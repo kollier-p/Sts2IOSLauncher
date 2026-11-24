@@ -60,5 +60,9 @@ def main():
     fw=frameworks/"sts2.framework";fw.mkdir(exist_ok=True)
     shutil.copy2(WORK/"framework/sts2",fw/"sts2")
     (fw/"Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable":"sts2","CFBundleIdentifier":"org.sts2mobile.ioslauncher.runtime","CFBundlePackageType":"FMWK","CFBundleVersion":"1","CFBundleShortVersionString":"1.0","MinimumOSVersion":"16.0"}))
-    run(sys.executable,ROOT/"scripts/package_native_ipa.py",app)
+    run(sys.executable,ROOT/"scripts/validate_native_app.py",app,"--extensions" if "--extensions" in sys.argv else "--diagnostic")
+    if "--package" in sys.argv:
+        run(sys.executable,ROOT/"scripts/package_native_ipa.py",app)
+    else:
+        print("Pre-IPA build complete: "+str(app),flush=True)
 if __name__=="__main__":main()

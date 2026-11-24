@@ -15,7 +15,7 @@ def integrate(project,extensions):
         candidates=[p for p in extensions.rglob("*") if p.is_file() and p.name.startswith(name) and (p.suffix==".a" or p.parent.suffix==".framework")]
         device=[]
         for p in candidates:
-            if "simulator" in str(p).lower():continue
+            if "simulator" in str(p).lower() or "template_debug" in str(p).lower():continue
             if subprocess.run(["xcrun","lipo","-verify_arch","arm64",p],capture_output=True).returncode==0:device.append(p)
         if len(device)!=1:raise SystemExit("Missing or ambiguous device binary "+name)
         p=device[0]

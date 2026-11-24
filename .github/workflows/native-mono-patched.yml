@@ -1,7 +1,11 @@
-name: Native Godot IPA (experimental)
+name: Native Godot pre-IPA build
 on:
   workflow_dispatch:
     inputs:
+      package_ipa:
+        description: 'Package IPA after compile and validation'
+        type: boolean
+        default: false
       include_extensions:
         description: "Include FMOD/Spine (builder confirms applicable licensing)"
         type: boolean
@@ -13,12 +17,16 @@ on:
       - 'scripts/stage_ios_runtime.py'
       - 'scripts/build_godot_host.py'
       - 'scripts/package_native_ipa.py'
+      - 'scripts/validate_native_app.py'
       - 'scripts/stage_extensions.py'
       - 'scripts/integrate_extensions.py'
       - 'src/**'
       - '.github/workflows/native-mono-patched.yml'
 permissions:
   contents: read
+concurrency:
+  group: native-pre-ipa-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   mono:
     runs-on: xcode-27
@@ -51,19 +59,31 @@ jobs:
       - name: Compile licensed native extension inputs
         if: inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true'
         run: python3 scripts/stage_extensions.py .native-build/extensions
-      - name: Export Godot host and package experimental IPA
+      - name: Compile and validate staged Godot app
         env:
           INCLUDE_EXTENSIONS: ${{ inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true' }}
+          PACKAGE_IPA: ${{ inputs.package_ipa == true }}
         run: |
-          if [ "$INCLUDE_EXTENSIONS" = "true" ]; then
-            python3 scripts/build_godot_host.py --extensions
-          else
-            python3 scripts/build_godot_host.py
-          fi
+          args=()
+          if [ "$INCLUDE_EXTENSIONS" = "true" ]; then args+=(--extensions); fi
+          if [ "$PACKAGE_IPA" = "true" ]; then args+=(--package); fi
+          python3 scripts/build_godot_host.py "${args[@]}"
       - uses: actions/upload-artifact@v4
+        if: inputs.package_ipa == true
         with:
           name: STS2IOSLauncher-native-experimental-ipa
           path: dist/STS2IOSLauncher-native-experimental.ipa
+          if-no-files-found: error
+      - name: Preserve pre-IPA build output
+        run: |
+          tar -czf .native-build/staged-app.tar.gz -C .native-build/godot-derived/Build/Products/Release-iphoneos Sts2Host.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: STS2IOSLauncher-pre-ipa
+          include-hidden-files: true
+          path: |
+            .native-build/staged-app.tar.gz
+            .native-build/pre-ipa-report.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

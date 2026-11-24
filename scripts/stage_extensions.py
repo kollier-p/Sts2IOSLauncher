@@ -3,9 +3,10 @@
 import pathlib,subprocess,hashlib,zipfile,shutil,sys
 ROOT=pathlib.Path(__file__).resolve().parents[1];WORK=ROOT/".native-build"
 def run(*args,cwd=None):subprocess.run([str(x) for x in args],cwd=cwd,check=True)
-def checkout(path,url,rev):
+def checkout(path,url,rev,sparse=()):
     if not path.exists():
         path.mkdir(parents=True);run("git","init",path);run("git","remote","add","origin",url,cwd=path)
+        if sparse:run("git","sparse-checkout","set",*sparse,cwd=path)
         run("git","fetch","--depth","1","origin",rev,cwd=path);run("git","checkout","--detach","FETCH_HEAD",cwd=path)
     if subprocess.check_output(["git","rev-parse","HEAD"],cwd=path,text=True).strip()!=rev:raise SystemExit("Unexpected extension revision")
 def main():
@@ -22,7 +23,7 @@ def main():
             dest=out/"fmod"/relative;dest.parent.mkdir(parents=True,exist_ok=True)
             with z.open(name) as src,dest.open("wb") as dst:shutil.copyfileobj(src,dst)
     spine=WORK/"spine-runtimes"
-    checkout(spine,"https://github.com/EsotericSoftware/spine-runtimes.git","e7dc1435fa4a0083ab431f1b28e083c14a1f5c68")
+    checkout(spine,"https://github.com/EsotericSoftware/spine-runtimes.git","e7dc1435fa4a0083ab431f1b28e083c14a1f5c68",("spine-cpp","spine-godot"))
     checkout(spine/"spine-godot/godot-cpp","https://github.com/godotengine/godot-cpp.git","e83fd0904c13356ed1d4c3d09f8bb9132bdc6b77")
     shutil.copytree(spine/"spine-cpp/spine-cpp",spine/"spine-godot/spine_godot/spine-cpp",dirs_exist_ok=True)
     run(sys.executable,"-m","venv",WORK/"extension-venv")
