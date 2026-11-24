@@ -48,3 +48,15 @@ public static class ChunkCache
         return CryptographicOperations.FixedTimeEquals(digest.GetHashAndReset(), hash);
     }
 }
+
+public sealed class TransferMeter(long total)
+{
+    long completed, network;
+    public (long Completed, TransferEstimate Estimate) Add(long bytes, bool downloaded, TimeSpan elapsed)
+    {
+        if (bytes < 0 || bytes > total - completed) throw new ArgumentOutOfRangeException(nameof(bytes));
+        completed += bytes;
+        if (downloaded) network += bytes;
+        return (completed, TransferEstimate.Calculate(completed - network, completed, total, elapsed));
+    }
+}

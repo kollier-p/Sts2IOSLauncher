@@ -106,7 +106,7 @@ sealed class SetupController(SceneDelegate app) : UIViewController
             if (reuse) { identity = IdentityVault.Load() ?? throw new InvalidOperationException("No saved Steam session. Sign in again."); await session.LogOnAsync(identity, true, cts.Token); }
             else { identity = await session.AuthenticateAsync(account, secret, new GuardUI(this, cts.Token), null, remember.On, cts.Token); if (remember.On) IdentityVault.Save(identity); }
             secret = "";
-            var reporter = new Progress<DownloadProgress>(p => { progress.Progress = p.Total > 0 ? Math.Clamp((float)((double)p.Completed / p.Total), 0, 1) : 0; status.Text = $"{p.Stage}: {p.Completed:N0} / {p.Total:N0} bytes"; });
+            var reporter = new Progress<DownloadProgress>(p => { progress.Progress = p.Total > 0 ? Math.Clamp((float)((double)p.Completed / p.Total), 0, 1) : 0; status.Text = $"{p.Stage}: {p.Completed / 1048576d:N1} / {p.Total / 1048576d:N1} MiB" + (p.Stage == "download" ? $"\n{p.BytesPerSecond / 1048576d:N2} MiB/s · ETA {p.Remaining?.ToString(@"hh\:mm\:ss") ?? "—"}" : ""); });
             await Task.Run(() => session.DownloadAndInstallAsync(store, selectedBranch, selectedManifest, reporter, cts.Token), cts.Token); success = true;
         }
         catch (OperationCanceledException) { status.Text = "Cancelled. Existing installation is unchanged."; }

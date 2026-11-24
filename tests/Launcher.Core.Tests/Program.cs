@@ -71,6 +71,12 @@ try
     Assert(!ChunkCache.Verify(partial, 3, 3, expected), "Reject incomplete chunk");
     Assert(!ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 4 })), "Reject corrupted chunk");
     Assert(!ChunkCache.Verify(partial, -1, 3, expected), "Reject negative offset");
-    Console.WriteLine("All payload, download, chunk and rollback fixture assertions passed.");
+    var meter = new TransferMeter(1000);
+    var cachedSample = meter.Add(400, false, TimeSpan.FromSeconds(1));
+    Assert(cachedSample.Completed == 400 && cachedSample.Estimate.BytesPerSecond == 0, "Cached data excluded from network speed");
+    var liveSample = meter.Add(200, true, TimeSpan.FromSeconds(2));
+    Assert(liveSample.Completed == 600 && liveSample.Estimate.BytesPerSecond == 100 && liveSample.Estimate.Remaining == TimeSpan.FromSeconds(4), "Mixed cached and live transfer ETA");
+    Reject(() => meter.Add(401, true, TimeSpan.FromSeconds(3)));
+    Console.WriteLine("All payload, download, chunk, meter and rollback fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

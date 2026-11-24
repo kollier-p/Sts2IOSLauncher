@@ -12,7 +12,7 @@ public sealed record SteamIdentity(string AccountName, string RefreshToken, stri
 {
     public override string ToString() => "SteamIdentity [redacted]";
 }
-public sealed record DownloadProgress(string Stage, long Completed, long Total);
+public sealed record DownloadProgress(string Stage, long Completed, long Total, double BytesPerSecond = 0, TimeSpan? Remaining = null);
 public sealed class SteamSession : IAsyncDisposable
 {
     readonly SteamClient client = new();
@@ -112,9 +112,11 @@ public sealed class SteamSession : IAsyncDisposable
         var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
         Directory.CreateDirectory(staging);
         var progressLock = new object();
-        void ReportBytes(long bytes)
+        var meter = new TransferMeter(total);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        void ReportBytes(long bytes, bool downloaded = false)
         {
-            lock (progressLock) { done += bytes; progress?.Report(new("download", done, total)); }
+            lock (progressLock) { var sample = meter.Add(bytes, downloaded, clock.Elapsed); done = sample.Completed; progress?.Report(new("download", done, total, sample.Estimate.BytesPerSecond, sample.Estimate.Remaining)); }
         }
         bool processing = false;
         try
@@ -154,7 +156,7 @@ public sealed class SteamSession : IAsyncDisposable
                         if (size != data.Length) throw new InvalidDataException("Unexpected chunk size.");
                         if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), chunk.ChunkID))
                             throw new InvalidDataException("Downloaded chunk hash mismatch.");
-                        await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size);
+                        await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size, true);
                     }
                     if (cursor != file.TotalSize) throw new InvalidDataException("File length mismatch.");
                     stream.SetLength(checked((long)file.TotalSize));
