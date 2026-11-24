@@ -17,13 +17,14 @@ public static class Entry
     static string documents = "", managed = "";
     static CancellationTokenSource? active;
     static TaskCompletionSource<string>? prompt;
+    static long promptId;
     static string? assemblyRoot;
     static string? adapterRoot;
     static Assembly? loadedGame;
     static string? releaseInfo;
     static State state = new("idle", "Sign in to Steam");
-    sealed record State(string Stage, string Message, long Completed=0,long Total=0,double Speed=0,string? Eta=null,string? Prompt=null,string[]? Branches=null);
-    sealed record Request(string Username,string Password,string Branch,string? Manifest,string? BetaPassword);
+    sealed record State(string Stage, string Message, long Completed=0,long Total=0,double Speed=0,string? Eta=null,string? Prompt=null,string[]? Branches=null,long PromptId=0);
+    sealed record Request(string Username,string Password,string Branch,string? Manifest,string? BetaPassword,bool Remember=false,bool Saved=false);
     static void Publish(State next) { lock(Sync) state=next; HostDiagnostics.Stage(next.Stage); }
     static string Str(nint p) => Marshal.PtrToStringUTF8(p) ?? "";
     public static int Initialize(nint payloadRoot,nint docs,nint bundled)
@@ -34,6 +35,7 @@ public static class Entry
             Directory.CreateDirectory(documents);
             HostDiagnostics.Initialize(Path.Combine(documents,"LauncherLogs"));
             AssemblyLoadContext.Default.Resolving += Resolve;
+            AssemblyLoadContext.Default.ResolvingUnmanagedDll += NativeLibraries.Resolve;
             Publish(new("idle",store.Current() is {} r ? $"Installed: {r.Branch} / {r.ManifestId}" : "No game installed"));
             return 0;
         } catch { return -1; }
@@ -42,7 +44,7 @@ public static class Entry
     {
         foreach(var dir in new[]{adapterRoot,assemblyRoot})
         {
-            if(dir is null || name.Name is null || name.Name.IndexOfAny(Path.GetInvalidFileNameChars())>=0) continue;
+            if(dir is null || name.Name is null || name.Name.StartsWith("System.",StringComparison.Ordinal) || name.Name is "System" or "mscorlib" or "netstandard" || name.Name.IndexOfAny(Path.GetInvalidFileNameChars())>=0) continue;
             var path=Path.Combine(dir,name.Name+".dll");
             if(File.Exists(path)) return context.LoadFromAssemblyPath(path);
         }
@@ -58,7 +60,7 @@ public static class Entry
     {
         try {
             var request=JsonSerializer.Deserialize<Request>(Str(input)) ?? throw new InvalidDataException();
-            if(string.IsNullOrWhiteSpace(request.Username)||string.IsNullOrEmpty(request.Password)) return -2;
+            if(!request.Saved&&(string.IsNullOrWhiteSpace(request.Username)||string.IsNullOrEmpty(request.Password))) return -2;
             ulong? exact=null;
             if(!string.IsNullOrWhiteSpace(request.Manifest)) {
                 if(!ulong.TryParse(request.Manifest,out var id)||id==0) return -3;
@@ -75,7 +77,14 @@ public static class Entry
         try {
             Publish(new("auth","Connecting to Steam"));
             await using var session=new SteamSession();
-            await session.AuthenticateAsync(request.Username,request.Password,new Guard(cts.Token),null,false,cts.Token);
+            if(request.Saved){
+                var saved=SteamVault.Load()??throw new InvalidOperationException("No saved Steam session.");
+                await session.LogOnAsync(saved,true,cts.Token);
+            }else{
+                var previous=request.Remember?SteamVault.Load():null;
+                var identity=await session.AuthenticateAsync(request.Username,request.Password,new Guard(cts.Token),previous?.AccountName==request.Username?previous.GuardData:null,request.Remember,cts.Token);
+                if(request.Remember)try{SteamVault.Save(identity);}catch(Exception e){HostDiagnostics.Error("keychain",e);}
+            }
             var branch=string.IsNullOrWhiteSpace(request.Branch)?"public":request.Branch;
             if(exact is null && branch=="?") {
                 var branches=await session.ListBranchesAsync(cts.Token);
@@ -97,11 +106,12 @@ public static class Entry
     static async Task<string> Ask(string kind,string message,CancellationToken ct,string[]? branches=null)
     {
         var tcs=new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock(Sync){prompt=tcs;state=new("prompt",message,Prompt:kind,Branches:branches);}
+        lock(Sync){prompt=tcs;state=new("prompt",message,Prompt:kind,Branches:branches,PromptId:++promptId);}
         try{return await tcs.Task.WaitAsync(ct);}
         finally{lock(Sync){if(prompt==tcs)prompt=null;}}
     }
     public static int Reply(nint input) { lock(Sync) return prompt?.TrySetResult(Str(input))==true?0:-1; }
+    public static int ForgetSession(){ lock(Sync){if(active is not null)return -1;try{return SteamVault.Clear();}catch{return -2;}} }
     public static int Cancel() { lock(Sync){active?.Cancel();return 0;} }
     public static int Prepare()
     {

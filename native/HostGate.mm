@@ -3,6 +3,8 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdio.h>
+void sts2_register_extensions();
 
 extern "C" int csops(pid_t,unsigned int,void*,size_t);
 using InitRuntime = int (*)(const char*,const char*,const char*);
@@ -16,7 +18,7 @@ static NSMutableDictionary<NSString*,NSValue*> *lifecycle;
 static BOOL started = NO;
 static InitHost initHost;
 static Command beginDownload, reply;
-static Simple cancelOperation, prepareGame;
+static Simple cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherGate : UIViewController
@@ -27,7 +29,8 @@ static Status copyStatus;
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget;
+@property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIAlertController *prompt;
 @property(nonatomic,copy) NSString *promptSignature;
@@ -75,15 +78,21 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.manifest=[self field:@"Exact manifest ID (optional)" secure:NO];
     self.beta=[self field:@"Private beta password (optional)" secure:YES];
     self.download=[self button:@"Sign in & install game" action:@selector(downloadPressed)];
+    self.remember=[UISwitch new];
+    UILabel *rememberLabel=[UILabel new];rememberLabel.text=@"Remember Steam session in Keychain";
+    UIStackView *rememberRow=[[UIStackView alloc]initWithArrangedSubviews:@[rememberLabel,self.remember]];
+    rememberRow.axis=UILayoutConstraintAxisHorizontal;rememberRow.spacing=8;
+    self.saved=[self button:@"Use saved Steam session" action:@selector(savedPressed)];
+    self.forget=[self button:@"Forget saved Steam session" action:@selector(forgetPressed)];
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
-    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,subtitle,self.account,self.password,self.branch,self.manifest,self.beta,self.download,self.play,self.progress,self.message,self.cancel]];
+    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,subtitle,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.play,self.progress,self.message,self.cancel]];
     stack.axis=UILayoutConstraintAxisVertical;stack.spacing=12;stack.translatesAutoresizingMaskIntoConstraints=NO;
     UIScrollView *scroll=[UIScrollView new];scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:24],[stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-24],[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48]]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=NO;
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -106,7 +115,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
             if(init&&get&&(rc=init(managed.UTF8String,nullptr,frameworks.UTF8String))==0 &&
                get("Initialize",(void**)&initHost)==0 && get("BeginDownload",(void**)&beginDownload)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
-               get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
+               get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
             else if(rc==0)rc=-20;
             dispatch_async(dispatch_get_main_queue(),^{self.initializing=NO;self.initialized=rc==0;if(rc!=0){[self.timer invalidate];self.message.text=[NSString stringWithFormat:@"Runtime initialization failed (%d). Restart after enabling JIT.",rc];}});
@@ -116,7 +125,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSDictionary *state=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:buffer length:length] options:0 error:nil];
     if(![state isKindOfClass:NSDictionary.class])return;
     NSString *stage=state[@"Stage"];NSString *message=state[@"Message"];
-    BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];self.download.enabled=self.play.enabled=idle;self.cancel.enabled=!idle;
+    BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];self.download.enabled=self.play.enabled=self.saved.enabled=self.forget.enabled=idle;self.cancel.enabled=!idle;
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
     self.progress.progress=total>0?done/total:0;
     self.message.text=total>0?[NSString stringWithFormat:@"%@\n%.1f / %.1f MiB • %.2f MiB/s",message,done/1048576,total/1048576,speed/1048576]:message;
@@ -125,6 +134,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
     if([stage isEqual:@"ready"]){
         [self.timer invalidate];self.message.text=@"Starting Godot…";
+        sts2_register_extensions();
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
         if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
         else{self.message.text=@"Godot startup failed. Restart the app.";}
@@ -132,7 +142,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)showPrompt:(NSDictionary*)state {
     NSString *kind=state[@"Prompt"],*message=state[@"Message"];
-    NSString *signature=[NSString stringWithFormat:@"%@:%@",kind,message];if([self.promptSignature isEqual:signature])return;
+    NSString *signature=[NSString stringWithFormat:@"%@:%@:%@",kind,message,state[@"PromptId"]];if([self.promptSignature isEqual:signature])return;
     self.promptSignature=signature;
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Steam" message:message preferredStyle:UIAlertControllerStyleAlert];self.prompt=alert;
     if([kind isEqual:@"branch"]){
@@ -147,8 +157,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a){cancelOperation();self.prompt=nil;}]];
     [self presentViewController:alert animated:YES completion:nil];
 }
-- (void)downloadPressed {
-    NSDictionary *request=@{@"Username":self.account.text?:@"",@"Password":self.password.text?:@"",@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@""};
+- (void)downloadPressed { [self startDownload:NO]; }
+- (void)savedPressed { [self startDownload:YES]; }
+- (void)forgetPressed { if(forgetSession()!=0)self.message.text=@"Unable to clear saved session."; }
+- (void)startDownload:(BOOL)saved {
+    NSDictionary *request=@{@"Username":self.account.text?:@"",@"Password":self.password.text?:@"",@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@"",@"Remember":@(self.remember.on),@"Saved":@(saved)};
     NSData *data=[NSJSONSerialization dataWithJSONObject:request options:0 error:nil];NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
     self.password.text=@"";self.beta.text=@"";[self.view endEditing:YES];int rc=beginDownload(json.UTF8String);
     if(rc!=0)self.message.text=[NSString stringWithFormat:@"Unable to start download (%d).",rc];

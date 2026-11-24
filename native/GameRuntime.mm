@@ -13,7 +13,7 @@ static void *runtime;
 static unsigned int domain;
 
 // Native game process only: never call from the managed UIKit launcher.
-extern "C" int sts2_initialize_game_runtime(const char *bclPath, const char *gamePath, const char *nativePath) {
+extern "C" __attribute__((visibility("default"))) int sts2_initialize_game_runtime(const char *bclPath, const char *gamePath, const char *nativePath) {
     if (runtime) return 0;
     if (!bclPath || !nativePath) return -1;
     if (sts2_probe_jit() != 0) return -2;

@@ -24,7 +24,7 @@ def main():
     for p in (project,out):
         if p.exists():shutil.rmtree(p)
         p.mkdir()
-    for name in ("project.godot","bootstrap.tscn"):shutil.copy2(ROOT/"native/host"/name,project/name)
+    for name in ("project.godot","bootstrap.tscn","icon.svg"):shutil.copy2(ROOT/"native/host"/name,project/name)
     (project/"export_presets.cfg").write_text((ROOT/"native/host/export_presets.cfg.in").read_text().replace("@TEMPLATE@",str(template)))
     godot=tools/"Godot_mono.app/Contents/MacOS/Godot"
     run(godot,"--headless","--path",project,"--editor","--quit-after","60")
@@ -45,10 +45,15 @@ def main():
     info.write_bytes(plistlib.dumps(metadata))
     if "--extensions" in sys.argv:
         run(sys.executable,ROOT/"scripts/integrate_extensions.py",xproj,WORK/"extensions")
+        shutil.copy2(ROOT/"native/ExtensionRegistry.mm",src/"ExtensionRegistry.mm")
+        with dummy.open("a") as f:f.write('\n#define STS2_NATIVE_EXTENSIONS 1\n#include "ExtensionRegistry.mm"\n')
+    else:
+        with dummy.open("a") as f:f.write('\nvoid sts2_register_extensions() {}\n')
     run("xcodebuild","-project",xproj,"-scheme","Sts2Host","-configuration","Release","-destination","generic/platform=iOS","-derivedDataPath",WORK/"godot-derived","CODE_SIGNING_ALLOWED=NO","CODE_SIGNING_REQUIRED=NO","DEVELOPMENT_TEAM=","build")
     app=WORK/"godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
     if not app.is_dir():raise SystemExit("Godot application missing")
     distribution=WORK/"runtime-distribution"
+    if (app/"Managed").exists():shutil.rmtree(app/"Managed")
     shutil.copytree(distribution/"Managed",app/"Managed",dirs_exist_ok=True)
     frameworks=app/"Frameworks";frameworks.mkdir(exist_ok=True)
     shutil.copytree(distribution/"Frameworks",frameworks,dirs_exist_ok=True)
