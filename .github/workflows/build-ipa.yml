@@ -47,7 +47,7 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -v:diag \
             -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false \
-            -p:MtouchExtraArgs="--gcc_flags=-Wl,-ignore_auto_link_framework,DiskArbitration" \
+            -p:MtouchExtraArgs="--gcc_flags=-Wl%2C-ignore_auto_link_framework%2CDiskArbitration" \
             -p:BuildIpa=false -p:ApplicationId="io.github.$owner.sts2ioslauncher" \
             -p:ApplicationDisplayVersion="$version" -p:ApplicationVersion="$GITHUB_RUN_NUMBER"
       - name: Package and scan IPA
