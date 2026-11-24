@@ -50,6 +50,29 @@ public sealed class SteamSession : IAsyncDisposable
         if (result != EResult.OK) throw new IOException($"Steam login failed: {result}");
         authenticated = true;
     }
+    public sealed record GameBranch(string Name, string Description, bool PasswordRequired, ulong? ManifestId);
+    public async Task<IReadOnlyList<GameBranch>> ListBranchesAsync(CancellationToken ct)
+    {
+        RequireSession(); ct.ThrowIfCancellationRequested();
+        var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null);
+        tokens.AppTokens.TryGetValue(Payload.AppId, out var token);
+        var info = await Apps.PICSGetProductInfo(new SteamApps.PICSRequest(Payload.AppId, token), null);
+        ct.ThrowIfCancellationRequested();
+        var product = info.Results?.FirstOrDefault(x => x.Apps.ContainsKey(Payload.AppId))
+            ?? throw new IOException("Steam did not return game product information.");
+        var depots = product.Apps[Payload.AppId].KeyValues["depots"];
+        var manifests = depots[Payload.WindowsDepot.ToString(CultureInfo.InvariantCulture)]["manifests"];
+        var result = new List<GameBranch>();
+        foreach (var branch in depots["branches"].Children)
+        {
+            var name = branch.Name;
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            var value = manifests[name]["gid"].Value;
+            ulong? id = ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) && parsed != 0 ? parsed : null;
+            result.Add(new(name, branch["description"].Value ?? "", branch["pwdrequired"].Value == "1", id));
+        }
+        return result.OrderBy(x => x.Name == "public" ? 0 : 1).ThenBy(x => x.Name, StringComparer.Ordinal).ToArray();
+    }
     public async Task<ulong> ResolveManifestAsync(string branch, CancellationToken ct)
     {
         RequireSession(); ct.ThrowIfCancellationRequested();
