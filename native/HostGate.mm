@@ -20,7 +20,7 @@ static BOOL started = NO;
 static InitHost initHost;
 static Command beginDownload, beginImport;
 static Reply reply;
-static Simple browseVersions, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -59,9 +59,9 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) NSDictionary *options;
 @property(nonatomic,strong) UIWindow *window;
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
-@property(nonatomic,strong) UILabel *message,*installation;
+@property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
@@ -113,6 +113,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
         name:UIApplicationDidBecomeActiveNotification object:self.application];
     UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";heading.font=[UIFont boldSystemFontOfSize:30];
     self.installation=[UILabel new];self.installation.text=@"No game installed";self.installation.textColor=UIColor.secondaryLabelColor;
+    self.profile=[UILabel new];self.profile.textColor=UIColor.secondaryLabelColor;
     self.account=[self field:@"Steam account name" secure:NO];self.password=[self field:@"Steam password" secure:YES];
     self.branch=[self field:@"Branch: public, beta name or ? to list" secure:NO];self.branch.text=@"?";
     self.manifest=[self field:@"Exact manifest ID (optional)" secure:NO];
@@ -127,14 +128,15 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
+    self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
-    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,self.installation,self.play,self.versions,self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.progress,self.message,self.cancel]];
+    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,self.installation,self.profile,self.play,self.profiles,self.versions,self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.progress,self.message,self.cancel]];
     stack.axis=UILayoutConstraintAxisVertical;stack.spacing=12;stack.translatesAutoresizingMaskIntoConstraints=NO;
     UIScrollView *scroll=[UIScrollView new];scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:24],[stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-24],[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48]]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=NO;
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -158,6 +160,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
             if(init&&get&&(rc=init(managed.UTF8String,nullptr,frameworks.UTF8String))==0 &&
                get("Initialize",(void**)&initHost)==0 && get("BeginDownload",(void**)&beginDownload)==0 &&
                get("BeginImport",(void**)&beginImport)==0 && get("BrowseVersions",(void**)&browseVersions)==0 &&
+               get("BrowseProfiles",(void**)&browseProfiles)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -184,9 +187,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(!self.waitingForSteam) [self endSteamBackgroundTask];
     BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];
     NSString *installed=[state[@"Installed"] isKindOfClass:NSString.class]?state[@"Installed"]:nil;
+    NSString *profile=[state[@"Profile"] isKindOfClass:NSString.class]?state[@"Profile"]:nil;
     self.installation.text=installed?[NSString stringWithFormat:@"Installed: %@",installed]:@"No game installed";
-    self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=idle;
-    self.play.enabled=idle && installed!=nil;
+    self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
+    self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
+    self.play.enabled=idle && installed!=nil && profile!=nil;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -242,7 +247,8 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [self presentViewController:sheet animated:YES completion:nil];
         return;
     }
-    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Steam" message:message preferredStyle:UIAlertControllerStyleAlert];
+    NSString *title=[kind isEqual:@"profile-name"]?@"New launch profile":@"Steam";
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     self.prompt=alert;
     if([kind isEqual:@"confirm"]){
         [alert addAction:[UIAlertAction actionWithTitle:@"Wait for approval" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(@"approve");}]];
@@ -261,6 +267,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)versionsPressed { [self.view endEditing:YES];if(browseVersions()!=0)[self showError:@"Another operation is active."]; }
+- (void)profilesPressed { [self.view endEditing:YES];if(browseProfiles()!=0)[self showError:@"Another operation is active."]; }
 - (void)importPressed {
     [self.view endEditing:YES];
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];

@@ -2,7 +2,7 @@
 
 Experimental iPadOS port of [Sts2MobileLauncher](https://github.com/kollier-p/Sts2MobileLauncher). The target is an 11-inch iPad Pro running iPadOS 17.6.3 with JIT enabled.
 
-The UIKit launcher supports Steam Guard, Keychain sessions, branch and manifest selection, resumable downloads of the owned Windows depot, ZIP and TAR import, and management of verified installations. The ARM64 build stages the patched Mono runtime inside Godot and stops at an unsigned `.app`. Live Steam authentication, on-device launch, and gameplay need device validation. Game files come from the user's Steam account or their own Windows archive.
+The UIKit launcher supports Steam Guard, Keychain sessions, branch and manifest selection, resumable downloads of the owned Windows depot, ZIP and TAR import, and management of verified installations. Launch profiles can isolate saves and mods. The ARM64 build stages the patched Mono runtime inside Godot and stops at an unsigned `.app`. Live Steam authentication, on-device launch, and gameplay need device validation. Game files come from the user's Steam account or their own Windows archive.
 
 Run the core tests with .NET 8:
     dotnet build src/Launcher.Steam/Launcher.Steam.csproj -c Release

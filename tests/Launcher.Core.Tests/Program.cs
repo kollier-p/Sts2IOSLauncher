@@ -167,6 +167,22 @@ try
     PayloadStorage.EnsureCapacity(11, 11);
     PayloadStorage.EnsureCapacity(11, null);
     Reject(() => PayloadStorage.EnsureCapacity(11, 10));
+    var profileSettings = Path.Combine(root, "profiles.json");
+    var profileData = Directory.CreateDirectory(Path.Combine(root, "documents")).FullName;
+    var profiles = new LaunchProfiles(profileSettings, profileData);
+    Assert(profiles.Current() == LaunchProfiles.Default, "Upgrades keep the default launch profile");
+    var sharedPaths = profiles.EnsureDirectories(LaunchProfiles.Default);
+    Assert(sharedPaths.SaveDirectory is null && sharedPaths.ModsDirectory == Path.Combine(profileData, "mods"), "Default profile keeps the shared game directories");
+    var isolated = profiles.Create("Beta testing", isolateSaves: true, isolateMods: true);
+    var isolatedPaths = profiles.EnsureDirectories(isolated);
+    Assert(isolatedPaths.ModsDirectory != sharedPaths.ModsDirectory && Directory.Exists(isolatedPaths.SaveDirectory), "Separate directories for isolated data");
+    Assert(isolatedPaths.GodotSavePath("profile2", "saves/settings.save") == $"user://LaunchProfiles/{isolated.Id}/default/1/profile2/saves/settings.save",
+        "Save routes retain slot and save-type paths beneath the selected profile");
+    Reject(() => isolatedPaths.GodotSavePath("../escape"));
+    var savesOnly = profiles.Create("Isolated saves", isolateSaves: true, isolateMods: false);
+    Assert(profiles.EnsureDirectories(savesOnly).ModsDirectory == sharedPaths.ModsDirectory, "Save isolation can share mods");
+    Assert(profiles.Select(isolated.Id) == isolated && new LaunchProfiles(profileSettings, profileData).Current() == isolated,
+        "Selected launch profile survives a restart");
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");

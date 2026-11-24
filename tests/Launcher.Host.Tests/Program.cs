@@ -10,6 +10,7 @@ unsafe
     delegate* unmanaged[Cdecl]<nint, int> import = &Entry.BeginImport;
     delegate* unmanaged[Cdecl]<nint, long, int> reply = &Entry.Reply;
     delegate* unmanaged[Cdecl]<int> versions = &Entry.BrowseVersions;
+    delegate* unmanaged[Cdecl]<int> profiles = &Entry.BrowseProfiles;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
@@ -20,6 +21,7 @@ unsafe
     Check(reply(0, 1) == -1, "A reply needs a live Steam prompt");
     Check(import(0) == -2, "Import rejects an invalid archive path");
     Check(versions() == -1, "Version selection needs an initialized host");
+    Check(profiles() == -1, "Profile selection needs an initialized host");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
 
@@ -41,6 +43,7 @@ unsafe
         }
         using var data = JsonDocument.Parse(status[..^1].ToArray());
         Check(data.RootElement.GetProperty("Stage").GetString() == "idle", "Native status reports the launcher's idle state");
+        Check(data.RootElement.GetProperty("Profile").GetString() == "Default", "Native status shows the active launch profile");
     }
     finally
     {

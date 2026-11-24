@@ -15,6 +15,9 @@ public static class Entry
 {
     static readonly object Sync = new();
     static PayloadStore? store;
+    static LaunchProfiles? profiles;
+    static LaunchProfile? activeProfile;
+    static LaunchProfilePaths? launchProfilePaths;
     static string documents = "", managed = "";
     static CancellationTokenSource? active;
     static TaskCompletionSource<string>? prompt;
@@ -26,7 +29,8 @@ public static class Entry
 
     sealed record Choice(string Value, string Title, string Detail);
     sealed record State(string Stage, string Message, long Completed = 0, long Total = 0, double Speed = 0,
-        string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0, string? Installed = null);
+        string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0,
+        string? Installed = null, string? Profile = null);
     sealed record Request(string Username, string Password, string Branch, string? Manifest, string? BetaPassword,
         bool Remember = false, bool Saved = false);
 
@@ -48,12 +52,19 @@ public static class Entry
             managed = Str(bundled);
             Directory.CreateDirectory(documents);
             HostDiagnostics.Initialize(Path.Combine(documents, "LauncherLogs"));
+            var support = Path.GetDirectoryName(store.Root)!;
+            profiles = new LaunchProfiles(Path.Combine(support, "LaunchProfiles.json"), documents);
+            try { activeProfile = profiles.Current(); }
+            catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+            { HostDiagnostics.Error("read launch profiles", error); }
             AssemblyLoadContext.Default.Resolving += Resolve;
             AssemblyLoadContext.Default.ResolvingUnmanagedDll += NativeLibraries.Resolve;
             try
             {
                 current = store.Current();
-                Publish(new("idle", current is null ? "Install or import the game to get started." : "Ready to play."));
+                Publish(activeProfile is null
+                    ? new("error", "The active launch profile could not be read.")
+                    : new("idle", current is null ? "Install or import the game to get started." : "Ready to play."));
             }
             catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
             {
@@ -89,7 +100,11 @@ public static class Entry
     public static int CopyStatus(nint buffer, int capacity)
     {
         byte[] json;
-        lock (Sync) json = JsonSerializer.SerializeToUtf8Bytes(state with { Installed = current?.DisplayName() });
+        lock (Sync) json = JsonSerializer.SerializeToUtf8Bytes(state with
+        {
+            Installed = current?.DisplayName(),
+            Profile = activeProfile?.Name
+        });
         if (buffer == 0 || capacity <= json.Length) return -json.Length - 1;
         Marshal.Copy(json, 0, buffer, json.Length);
         Marshal.WriteByte(buffer, json.Length, 0);
@@ -228,6 +243,42 @@ public static class Entry
             return SetCurrent(payloads.ActivateVersion(selection, ct), "Selected version is ready to play.");
         }) ? 0 : -1;
 
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseProfiles() => Start("Launch profile", new("profiles", "Reading launch profiles…"),
+        async (_, ct) =>
+        {
+            var stored = profiles ?? throw new InvalidOperationException("Launch profiles are unavailable.");
+            var choices = stored.List().Select(profile => new Choice(profile.Id, profile.Name,
+                (profile.Id == activeProfile?.Id ? "Active · " : "") +
+                (profile.IsolateSaves ? "Isolated saves" : "Shared saves") + " · " +
+                (profile.IsolateMods ? "Isolated mods" : "Shared mods"))).ToList();
+            choices.Add(new("new", "New profile", "Choose which data to isolate"));
+            var selection = await Ask("profile", "Launch profiles", ct, choices.ToArray());
+            LaunchProfile profile;
+            if (selection == "new")
+            {
+                var name = (await Ask("profile-name", "Name the launch profile", ct)).Trim();
+                if (name.Length is < 1 or > 64 || name.Any(char.IsControl))
+                    return new("error", "Enter a profile name between 1 and 64 characters.");
+                if (choices.Any(choice => choice.Value != "new" && string.Equals(choice.Title, name, StringComparison.OrdinalIgnoreCase)))
+                    return new("error", "A profile with that name already exists.");
+                var isolation = await Ask("profile-isolation", "Choose what to isolate", ct,
+                    [new("both", "Saves and mods", "Separate both directories for this profile"),
+                     new("saves", "Saves only", "Share mods with the default profile"),
+                     new("mods", "Mods only", "Use the game's existing saves")]);
+                if (isolation is not ("both" or "saves" or "mods")) throw new InvalidDataException("Invalid profile mode.");
+                ct.ThrowIfCancellationRequested();
+                profile = stored.Create(name, isolation != "mods", isolation != "saves");
+            }
+            else
+            {
+                ct.ThrowIfCancellationRequested();
+                profile = stored.Select(selection);
+            }
+            lock (Sync) activeProfile = profile;
+            return new("idle", $"Launch profile selected: {profile.Name}.");
+        }) ? 0 : -1;
+
     static State SetCurrent(InstallReceipt receipt, string message)
     {
         lock (Sync) current = receipt;
@@ -319,7 +370,9 @@ public static class Entry
     static State PrepareLaunch(PayloadStore payloads, CancellationToken ct)
     {
         if (NativeExtensionsAvailable() != 1) return new("error", "Play requires an extension-enabled launcher build.");
+        if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
         var plan = LaunchPlan.Prepare(payloads, documents, ct);
+        launchProfilePaths = profiles!.EnsureDirectories(activeProfile);
         var adapter = Path.Combine(Path.GetDirectoryName(payloads.Root)!, "RuntimeAdapters", plan.Receipt.PayloadId);
         Directory.CreateDirectory(adapter);
         var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
@@ -364,7 +417,8 @@ public static class Entry
     {
         try
         {
-            GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(), documents,
+            GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),
+                activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException());
             return 0;
         }

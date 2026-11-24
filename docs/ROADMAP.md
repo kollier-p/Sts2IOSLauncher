@@ -6,7 +6,7 @@ Target device is a JIT-enabled 11-inch iPad Pro running iPadOS 17.6.3. Feature c
 | --- | --- |
 | Steam account and Guard | Password, mobile/email code, mobile approval, and Keychain session reuse are implemented. Verify with a live account on the iPad. |
 | Steam game installation | Ownership, public and beta branches, exact manifest selection, resumable verified downloads, and version switching are implemented. Verify against the live Windows depot. |
-| Archive import and profiles | Import ZIP, TAR, or gzip-compressed TAR from Files. Switch verified versions and remove inactive installations. Other archive formats and isolated save/mod profiles remain open. |
+| Archive import and profiles | Import ZIP, TAR, or gzip-compressed TAR from Files. Switch verified versions and remove inactive installations. Launch profiles can isolate saves, mods, or both. Per-profile game version selection and additional archive formats remain open. |
 | Game startup | Patched ARM64 Mono, Godot handoff, and initial Harmony hooks are integrated. Verify on device with licensed FMOD and Spine frameworks. |
 | Compatibility and input | Local mod paths and initial platform hooks are implemented. Full compatibility pack, touch adaptation, controller behavior, rendering, and audio need device work. |
 | Launcher utilities | Persistent launcher diagnostics are implemented. Mod management, Workshop, Nexus, Steam Cloud, WebDAV, save snapshots, file browser, localization, and settings remain open. |

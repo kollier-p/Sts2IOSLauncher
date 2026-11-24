@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
+using Launcher.Core;
 namespace Launcher.Host;
 
 // Android compatibility behaviour, implemented without a compile-time dependency
@@ -8,28 +9,31 @@ namespace Launcher.Host;
 internal static class GameCompatibility
 {
     const BindingFlags Flags=BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.Instance|BindingFlags.DeclaredOnly;
-    static string documents="", releaseInfo="";
+    static string releaseInfo="";
+    static LaunchProfilePaths? profilePaths;
+    static MethodInfo? profileDirectory;
     static object? harmony;
     static Type? harmonyMethod;
     static MethodInfo? patch;
-    public static void Apply(Assembly game,string docs,string release)
+    public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release)
     {
-        documents=docs;releaseInfo=release;
+        profilePaths=paths;releaseInfo=release;
         var library=AssemblyLoadContext.Default.LoadFromAssemblyName(new AssemblyName("0Harmony"));
         var harmonyType=library.GetType("HarmonyLib.Harmony",true)!;
         harmonyMethod=library.GetType("HarmonyLib.HarmonyMethod",true)!;
         harmony=Activator.CreateInstance(harmonyType,"org.sts2mobile.ios.compat")!;
         patch=harmonyType.GetMethods().Single(m=>m.Name=="Patch"&&m.GetParameters().Length>=2&&m.GetParameters()[0].ParameterType==typeof(MethodBase));
-        Directory.CreateDirectory(Path.Combine(documents,"mods"));
         // The game is owned and downloaded through Steam. Desktop native Steamworks
         // initialization is not usable on iOS; multiplayer needs its own adapter.
         Require(game,"MegaCrit.Sts2.Core.Nodes.NGame","InitializePlatform",typeof(Task<bool>),nameof(Platform));
         Optional(game,"MegaCrit.Sts2.Core.Debug.OsDebugInfo","LogSystemInfo",typeof(Task),nameof(Complete));
         Optional(game,"MegaCrit.Sts2.Core.Debug.SentryService","Initialize",typeof(void),nameof(Skip));
         Optional(game,"MegaCrit.Sts2.Core.Saves.PrefsSave","get_UploadData",typeof(bool),nameof(False));
+        if (profile.IsolateSaves) PatchIsolatedSaves(game);
         var mods=game.GetType("MegaCrit.Sts2.Core.Modding.ModManager");
         var scanner=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadModsInDirRecursive"&&m.GetParameters().FirstOrDefault()?.ParameterType==typeof(string)).ToArray()??[];
         if(scanner.Length==1) Patch(scanner[0],typeof(GameCompatibility).GetMethod(nameof(ModPath),Flags)!);
+        else if (profile.IsolateMods) throw new NotSupportedException("This game build does not expose a compatible mod directory scanner.");
         var steamScan=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadSteamMods").ToArray()??[];
         foreach(var method in steamScan)
         {
@@ -38,6 +42,48 @@ internal static class GameCompatibility
         }
         var releaseMethods=game.GetType("MegaCrit.Sts2.Core.Debug.ReleaseInfoManager")?.GetMethods(Flags).Where(m=>m.Name=="LoadConfig"&&m.ReturnType.IsClass).ToArray()??[];
         if(releaseMethods.Length==1)Patch(releaseMethods[0],typeof(GameCompatibility).GetMethod(nameof(Release),Flags)!.MakeGenericMethod(releaseMethods[0].ReturnType),"postfix");
+    }
+
+    static void PatchIsolatedSaves(Assembly game)
+    {
+        var provider = game.GetType("MegaCrit.Sts2.Core.Saves.UserDataPathProvider");
+        MethodInfo? Find(string name, params Type[] parameters)
+        {
+            var method = provider?.GetMethod(name, Flags, binder: null, types: parameters, modifiers: null);
+            return method?.ReturnType == typeof(string) ? method : null;
+        }
+
+        profileDirectory = Find("GetProfileDir", typeof(int));
+        var account = Find("GetAccountScopedBasePath", typeof(string));
+        var slot = Find("GetProfileScopedBasePath", typeof(int));
+        var slotData = Find("GetProfileScopedPath", typeof(int), typeof(string));
+        if (profileDirectory?.IsStatic != true || account is null || slot is null || slotData is null)
+            throw new NotSupportedException("This game build does not expose compatible save path methods.");
+
+        Patch(account, typeof(GameCompatibility).GetMethod(nameof(AccountSavePath), Flags)!);
+        Patch(slot, typeof(GameCompatibility).GetMethod(nameof(SlotSavePath), Flags)!);
+        Patch(slotData, typeof(GameCompatibility).GetMethod(nameof(SlotDataPath), Flags)!);
+    }
+
+    static string GetProfileDirectory(int slot) => (string?)profileDirectory!.Invoke(null, [slot])
+        ?? throw new InvalidDataException("The game returned no profile directory.");
+
+    static bool AccountSavePath(string __0, ref string __result)
+    {
+        __result = profilePaths!.GodotSavePath(__0);
+        return false;
+    }
+
+    static bool SlotSavePath(int __0, ref string __result)
+    {
+        __result = profilePaths!.GodotSavePath(GetProfileDirectory(__0));
+        return false;
+    }
+
+    static bool SlotDataPath(int __0, string __1, ref string __result)
+    {
+        __result = profilePaths!.GodotSavePath(GetProfileDirectory(__0), __1);
+        return false;
     }
     static void Require(Assembly game,string type,string name,Type returns,string hook)
     {
@@ -68,7 +114,7 @@ internal static class GameCompatibility
         if(string.IsNullOrWhiteSpace(__0))return;
         var full=Path.GetFullPath(__0);
         var desktop=Path.Combine(AppContext.BaseDirectory,"mods");
-        if(full==desktop||Path.GetFileName(full)=="mods")__0=Path.Combine(documents,"mods");
+        if(full==desktop||Path.GetFileName(full)=="mods")__0=profilePaths!.ModsDirectory;
     }
     public static void Release<T>(ref T __result) where T:class
     {
