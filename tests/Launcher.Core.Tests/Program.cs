@@ -34,6 +34,20 @@ try
     var md5At = 256 + 4 + 4 + "project.binary".Length + 8 + 8;
     var body = Encoding.UTF8.GetBytes("disabled/SentryInit\0disabled/SentryBootstrap");
     Assert(bytes.AsSpan(md5At, 16).SequenceEqual(MD5.HashData(body)), "PCK directory checksum");
+    var scriptCopy=Path.Combine(root,"script-test.pck");
+    File.Copy(pckPath,scriptCopy);
+    Assert(PckScripts.AddPaths(scriptCopy,new[]{"res://Scripts/Test.cs","res://Scripts/Test.cs","res://../bad.cs"})==1,"Script placeholders deduplicated");
+    Assert(PckScripts.AddPaths(scriptCopy,new[]{"res://Scripts/Test.cs"})==0,"Script patch idempotent");
+    using(var f=File.OpenRead(scriptCopy))using(var r=new BinaryReader(f)){
+        f.Position=32;var directory=r.ReadUInt64();f.Position=(long)directory;
+        Assert(r.ReadUInt32()==2,"Rebuilt directory count");
+        var first=r.ReadUInt32();f.Position+=first+36;
+        var length=r.ReadUInt32();var name=Encoding.UTF8.GetString(r.ReadBytes((int)length)).TrimEnd('\0');
+        var offset=r.ReadUInt64();var size=r.ReadUInt64();var hash=r.ReadBytes(16);
+        Assert(name=="res://Scripts/Test.cs"&&size==1&&hash.SequenceEqual(MD5.HashData(new byte[]{10})),"Script metadata");
+        f.Position=(long)offset;Assert(r.ReadByte()==10,"Placeholder data");
+    }
+    Assert(File.ReadAllBytes(pckPath).SequenceEqual(bytes),"Original pack unchanged");
     var receipt = store.Install(stage, 123, "public");
     Assert(store.Current() == receipt, "Persistent receipt");
     var broken = store.NewStaging(); Reject(() => store.Install(broken, 456, "public"));
