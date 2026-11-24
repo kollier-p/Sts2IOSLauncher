@@ -43,27 +43,52 @@ public sealed class SaveSnapshots(string saves, string backups)
         var manifest = Read(id);
         var source = Payload.SafePath(root, id + "/files");
         var stage = live + ".restore-" + Guid.NewGuid().ToString("N");
-        var previous = Previous(live);
         try
         {
             var verified = Copy(source, stage, ct);
             if (verified.Count != manifest.Hashes.Count ||
                 verified.Any(pair => !manifest.Hashes.TryGetValue(pair.Key, out var hash) || hash != pair.Value))
                 throw new InvalidDataException("The save snapshot failed verification.");
-            CreateBackup("Before restore", ct);
-            ct.ThrowIfCancellationRequested();
-            if (Directory.Exists(live)) Directory.Move(live, previous);
-            try { Directory.Move(stage, live); }
-            catch
-            {
-                Recover(live);
-                throw;
-            }
-            // The restore is committed once the new directory is in place.
-            Recover(live);
+            SwapIn(stage, "Before restore", ct);
             return manifest.Snapshot;
         }
         finally { if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true); }
+    }
+
+    public void ApplyDownloadedFiles(IReadOnlyDictionary<string, string> downloads, CancellationToken ct = default)
+    {
+        if (downloads.Count == 0) return;
+        using var operation = Lock(live);
+        Recover(live);
+        var stage = live + ".restore-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            Directory.CreateDirectory(stage);
+            if (Directory.Exists(live)) Copy(live, stage, ct);
+            foreach (var (relative, source) in downloads)
+            {
+                ct.ThrowIfCancellationRequested();
+                var output = Payload.SafePath(stage, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                File.Copy(source, output, overwrite: true);
+            }
+            SwapIn(stage, "Before cloud pull", ct);
+        }
+        finally { if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true); }
+    }
+
+    void SwapIn(string stage, string backupReason, CancellationToken ct)
+    {
+        CreateBackup(backupReason, ct);
+        ct.ThrowIfCancellationRequested();
+        if (Directory.Exists(live)) Directory.Move(live, Previous(live));
+        try { Directory.Move(stage, live); }
+        catch
+        {
+            Recover(live);
+            throw;
+        }
+        Recover(live);
     }
 
     public static void RecoverInterruptedRestore(string saves)

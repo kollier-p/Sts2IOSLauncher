@@ -216,6 +216,37 @@ try
     Directory.Move(saves, saves + ".before-restore");
     SaveSnapshots.RecoverInterruptedRestore(saves);
     Assert(File.ReadAllText(saveFile) == "second run", "Interrupted restore recovers the previous save directory");
+    var webDavSettings = new WebDavSettings("https://dav.example/dav/", "user", "fixture", "global", false);
+    Reject(() => (webDavSettings with { Slot = "../outside" }).BaseUri());
+    Assert(SaveFileRules.Include("modded/profile2/saves/history/test.run", false) &&
+        !SaveFileRules.Include("profile2/saves/history/../bad.run", true), "Cloud sync includes only recognized save paths");
+    using var dav = new WebDavFixture();
+    using var davHttp = new HttpClient(dav);
+    var webDav = new WebDavSaves(davHttp, webDavSettings);
+    var syncRoot = Path.Combine(root, "webdav-saves");
+    var syncBackups = Path.Combine(root, "webdav-backups");
+    var syncBaseline = Path.Combine(root, "webdav-baselines");
+    const string syncSlot = "/dav/SlayTheSpire2/saves/global/";
+    const string syncSave = "profile1/saves/current_run.save";
+    var syncFile = Path.Combine(syncRoot, syncSave);
+    dav.Files[syncSlot + syncSave] = "server run";
+    dav.Files[syncSlot + "modded/" + syncSave] = "server modded run";
+    dav.Files[syncSlot + "settings.save"] = "server settings";
+    webDav.TestConnectionAsync(CancellationToken.None).GetAwaiter().GetResult();
+    SaveSyncResult SyncDav(bool push, bool force = false) => webDav.SyncAsync(syncRoot, syncBackups, syncBaseline,
+        "shared", push, force, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(SyncDav(false).Transferred == 2 && File.ReadAllText(syncFile) == "server run" &&
+        File.ReadAllText(Path.Combine(syncRoot, "modded", syncSave)) == "server modded run" &&
+        !File.Exists(Path.Combine(syncRoot, "settings.save")), "WebDAV uses the Android slot layout and preserves normal and modded saves separately");
+    File.WriteAllText(syncFile, "local next run");
+    Assert(SyncDav(true).Transferred == 1 && dav.Files[syncSlot + syncSave] == "local next run" && dav.LastIfMatch?.Tag == "\"save-version\"",
+        "WebDAV uploads the active changes with a conditional request");
+    File.WriteAllText(syncFile, "unsynced local run");
+    dav.Files[syncSlot + syncSave] = "other device run";
+    Reject(() => SyncDav(false));
+    Assert(File.ReadAllText(syncFile) == "unsynced local run", "WebDAV conflicts leave live files intact");
+    Assert(SyncDav(false, true).Transferred == 1 && File.ReadAllText(syncFile) == "other device run" &&
+        new SaveSnapshots(syncRoot, syncBackups).List().Any(backup => backup.Reason == "Before cloud pull"), "Explicit conflict resolution backs up local data first");
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");
@@ -259,6 +290,6 @@ try
     Reject(() => store.VerifyForLaunch());
     Reject(() => store.ActivateVersion(receipt.PayloadId));
     Assert(store.Current() == receipt, "Integrity failure never changes active pointer");
-    Console.WriteLine("All payload, archive import, download, chunk, meter, integrity and rollback fixture assertions passed.");
+    Console.WriteLine("Payload, download, archive, save, WebDAV and launcher fixtures passed.");
 }
 finally { Directory.Delete(root, true); }

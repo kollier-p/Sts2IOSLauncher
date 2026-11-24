@@ -352,6 +352,78 @@ public static class Entry
             return new("idle", "Save snapshot restored.");
         }) ? 0 : -1;
 
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseWebDav() => Start("WebDAV", new("webdav", "Opening WebDAV settings…"),
+        async (payloads, ct) =>
+        {
+            var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
+            var settings = WebDavVault.Load();
+            var choices = new List<Choice> { new("configure", "Configure connection", "Enter a WebDAV URL and remote save slot") };
+            if (settings is not null)
+            {
+                choices.Add(new("test", "Test connection", $"Remote slot {settings.Slot}"));
+                choices.Add(new("pull", "Download saves", "Back up and apply remote changes"));
+                choices.Add(new("push", "Upload saves", "Send local save changes"));
+                choices.Add(new("forget", "Forget WebDAV connection", "Remove the credentials from Keychain"));
+            }
+            var action = await Ask("webdav-action", "WebDAV save sync", ct, choices.ToArray());
+            if (action == "configure")
+            {
+                var endpoint = await Ask("webdav-url", "Enter the HTTPS WebDAV collection URL", ct);
+                var user = await Ask("webdav-user", "Enter the WebDAV username", ct);
+                var password = await Ask("webdav-password", "Enter the WebDAV password", ct);
+                var slot = (await Ask("webdav-slot", "Enter the remote save slot", ct)).Trim();
+                if (slot.Length == 0) slot = "global";
+                var syncSettings = await Ask("webdav-settings", "Include game settings in sync?", ct,
+                    [new("no", "Saves only", "Keep device settings local"), new("yes", "Include settings", "Sync settings.save along with saves")]);
+                var updated = new WebDavSettings(endpoint, user.Trim(), password, slot, syncSettings == "yes");
+                try { updated.BaseUri(); }
+                catch (ArgumentException error) { return new("error", error.Message); }
+                ct.ThrowIfCancellationRequested();
+                WebDavVault.Save(updated);
+                return new("idle", "WebDAV connection saved.");
+            }
+            if (settings is null) throw new InvalidOperationException("A WebDAV connection is required.");
+            if (action == "forget")
+            {
+                if (WebDavVault.Clear() != 0) throw new IOException("Unable to clear the WebDAV credentials.");
+                return new("idle", "WebDAV connection forgotten.");
+            }
+
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
+            var cloud = new WebDavSaves(http, settings);
+            if (action == "test")
+            {
+                Publish(new("webdav", "Testing WebDAV connection…"));
+                await cloud.TestConnectionAsync(ct);
+                return new("idle", "WebDAV connection succeeded.");
+            }
+            if (action is not ("pull" or "push")) throw new InvalidDataException("Invalid WebDAV action.");
+            var upload = action == "push";
+            var profileKey = profile.IsolateSaves ? profile.Id : "shared";
+            var support = Path.GetDirectoryName(payloads.Root)!;
+            var saveDirectory = profiles!.SnapshotSaveDirectory(profile);
+            var snapshots = Payload.SafePath(support, $"SaveSnapshots/{profileKey}");
+            var baseline = Payload.SafePath(support, "WebDavBaselines");
+            Publish(new("webdav", "Comparing local and remote saves…"));
+            SaveSyncResult result;
+            try
+            {
+                result = await cloud.SyncAsync(saveDirectory, snapshots, baseline, profileKey, upload, false, ct);
+            }
+            catch (SaveSyncConflictException conflict)
+            {
+                var preferred = upload ? "Use iPad saves" : "Use WebDAV saves";
+                var resolution = await Ask("webdav-conflict", $"{conflict.Count} save files conflict", ct,
+                    [new("cancel", "Keep both copies", "Return without syncing"),
+                     new("replace", preferred, upload ? "Replace conflicting files on the server" : "Back up local saves before replacing them")]);
+                if (resolution != "replace") return new("idle", "WebDAV changes kept on both sides.");
+                Publish(new("webdav", "Applying the selected WebDAV changes…"));
+                result = await cloud.SyncAsync(saveDirectory, snapshots, baseline, profileKey, upload, true, ct);
+            }
+            return new("idle", upload ? $"Uploaded {result.Transferred} save files." : $"Downloaded {result.Transferred} save files.");
+        }) ? 0 : -1;
+
     static bool Start(string operation, State pending, Func<PayloadStore, CancellationToken, Task<State>> run)
     {
         CancellationTokenSource cts;

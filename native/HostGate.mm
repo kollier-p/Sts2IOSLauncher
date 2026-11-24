@@ -20,7 +20,7 @@ static BOOL started = NO;
 static InitHost initHost;
 static Command beginDownload, beginImport;
 static Reply reply;
-static Simple browseVersions, browseProfiles, browseSnapshots, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -61,7 +61,8 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav;
+@property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
@@ -104,6 +105,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (UIButton*)button:(NSString*)title action:(SEL)action {
     UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:title forState:UIControlStateNormal];[b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];return b;
 }
+- (UIStackView *)section:(NSArray<UIView *> *)views {
+    UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:views];
+    stack.axis=UILayoutConstraintAxisVertical;
+    stack.spacing=12;
+    return stack;
+}
+- (void)sectionChanged:(UISegmentedControl *)control {
+    [self.view endEditing:YES];
+    for(NSUInteger index=0;index<self.sections.count;index++) self.sections[index].hidden=index!=(NSUInteger)control.selectedSegmentIndex;
+}
 - (void)viewDidLoad {
     [super viewDidLoad];self.view.backgroundColor=UIColor.systemBackgroundColor;
     self.steamBackgroundTask=UIBackgroundTaskInvalid;
@@ -130,14 +141,33 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
     self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
     self.snapshots=[self button:@"Save snapshots" action:@selector(snapshotsPressed)];
+    self.webDav=[self button:@"WebDAV save sync" action:@selector(webDavPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
-    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,self.installation,self.profile,self.play,self.profiles,self.versions,self.snapshots,self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.progress,self.message,self.cancel]];
-    stack.axis=UILayoutConstraintAxisVertical;stack.spacing=12;stack.translatesAutoresizingMaskIntoConstraints=NO;
+    UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
+    playStyle.title=@"Play installed game";
+    self.play.configuration=playStyle;
+    UIButtonConfiguration *downloadStyle=UIButtonConfiguration.filledButtonConfiguration;
+    downloadStyle.title=@"Sign in & install game";
+    self.download.configuration=downloadStyle;
+
+    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves"]];
+    navigation.selectedSegmentIndex=0;
+    [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
+    UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
+    UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
+    UIStackView *savesSection=[self section:@[self.snapshots,self.webDav]];
+    self.sections=@[playSection,installSection,savesSection];
+    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,self.progress,self.message,self.cancel]];
+    stack.spacing=16;
+    stack.translatesAutoresizingMaskIntoConstraints=NO;
+    [self sectionChanged:navigation];
     UIScrollView *scroll=[UIScrollView new];scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:24],[stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-24],[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48]]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=NO;
+    NSLayoutConstraint *preferredWidth=[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48];
+    preferredWidth.priority=UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -163,6 +193,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("BeginImport",(void**)&beginImport)==0 && get("BrowseVersions",(void**)&browseVersions)==0 &&
                get("BrowseProfiles",(void**)&browseProfiles)==0 &&
                get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
+               get("BrowseWebDav",(void**)&browseWebDav)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -194,7 +225,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
     self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.play.enabled=idle && installed!=nil && profile!=nil;
-    self.snapshots.enabled=idle && profile!=nil;
+    self.snapshots.enabled=self.webDav.enabled=idle && profile!=nil;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -250,14 +281,20 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [self presentViewController:sheet animated:YES completion:nil];
         return;
     }
-    NSString *title=[kind isEqual:@"profile-name"]?@"New launch profile":@"Steam";
+    NSString *title=[kind isEqual:@"profile-name"]?@"New launch profile":([kind hasPrefix:@"webdav-"]?@"WebDAV":@"Steam");
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     self.prompt=alert;
     if([kind isEqual:@"confirm"]){
         [alert addAction:[UIAlertAction actionWithTitle:@"Wait for approval" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(@"approve");}]];
         [alert addAction:[UIAlertAction actionWithTitle:@"Enter code" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(@"code");}]];
     }else{
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *field){field.secureTextEntry=[kind isEqual:@"password"];field.autocapitalizationType=UITextAutocapitalizationTypeNone;}];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *field){
+            field.secureTextEntry=[kind isEqual:@"password"] || [kind isEqual:@"webdav-password"];
+            field.autocapitalizationType=UITextAutocapitalizationTypeNone;
+            field.autocorrectionType=UITextAutocorrectionTypeNo;
+            if([kind isEqual:@"webdav-url"]) field.keyboardType=UIKeyboardTypeURL;
+            if([kind isEqual:@"webdav-slot"]) field.placeholder=@"global";
+        }];
         __weak UIAlertController *weakAlert=alert;
         [alert addAction:[UIAlertAction actionWithTitle:@"Submit" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(weakAlert.textFields.firstObject.text ?: @"");}]];
     }
@@ -272,6 +309,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)versionsPressed { [self.view endEditing:YES];if(browseVersions()!=0)[self showError:@"Another operation is active."]; }
 - (void)profilesPressed { [self.view endEditing:YES];if(browseProfiles()!=0)[self showError:@"Another operation is active."]; }
 - (void)snapshotsPressed { [self.view endEditing:YES];if(browseSnapshots()!=0)[self showError:@"Another operation is active."]; }
+- (void)webDavPressed { [self.view endEditing:YES];if(browseWebDav()!=0)[self showError:@"Another operation is active."]; }
 - (void)importPressed {
     [self.view endEditing:YES];
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
