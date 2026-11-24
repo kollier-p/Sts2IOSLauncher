@@ -138,11 +138,50 @@ public sealed class PayloadStore(string root)
     }
     public InstallReceipt? Current()
     {
+        var receipt = ReadCurrentReceipt();
+        if (receipt is null) return null;
+        Payload.Validate(Payload.SafePath(Root, "payload-" + receipt.PayloadId));
+        return receipt;
+    }
+
+    public void RemoveVersion(string payloadId, CancellationToken ct = default)
+    {
+        using var installLock = AcquireWriteLock();
+        ct.ThrowIfCancellationRequested();
+        if (ReadCurrentReceipt()?.PayloadId == payloadId)
+            throw new InvalidOperationException("Select another version before removing the current installation.");
+        var receipt = InstalledVersions().SingleOrDefault(x => x.PayloadId == payloadId)
+            ?? throw new InvalidDataException("Installed version not found.");
+        var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
+        var removal = Payload.SafePath(Root, "remove-" + receipt.PayloadId);
+        ct.ThrowIfCancellationRequested();
+        // Remove it from the version list before deleting any files.
+        Directory.Move(directory, removal);
+        Directory.Delete(removal, recursive: true);
+    }
+
+    public void CompleteVersionRemovals(CancellationToken ct = default)
+    {
+        if (!Directory.Exists(Root)) return;
+        using var installLock = AcquireWriteLock();
+        foreach (var path in Directory.GetDirectories(Root, "remove-*"))
+        {
+            ct.ThrowIfCancellationRequested();
+            var name = Path.GetFileName(path);
+            var id = name["remove-".Length..];
+            var separator = id.IndexOf('-');
+            if (separator <= 0 || !ulong.TryParse(id.AsSpan(0, separator), out _) ||
+                !Guid.TryParseExact(id.AsSpan(separator + 1), "N", out _)) continue;
+            Directory.Delete(Payload.SafePath(Root, name), recursive: true);
+        }
+    }
+
+    InstallReceipt? ReadCurrentReceipt()
+    {
         var pointer = Path.Combine(Root, "current.json");
         if (!File.Exists(pointer)) return null;
         var receipt = JsonSerializer.Deserialize<InstallReceipt>(File.ReadAllText(pointer)) ?? throw new InvalidDataException("Invalid install receipt.");
         if (!ValidIdentity(receipt)) throw new InvalidDataException("Invalid payload identity.");
-        var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId); Payload.Validate(directory);
         return receipt;
     }
 

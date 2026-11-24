@@ -1,4 +1,5 @@
 using Launcher.Core;
+using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
 using System.Security.Cryptography;
@@ -138,7 +139,34 @@ try
         zip.CreateEntry("Steam library/Game/" + Payload.AssemblyDirectory + "/STS2.dll");
     Reject(() => ArchiveImport.ImportZipAsync(store, zipPath, null, CancellationToken.None).GetAwaiter().GetResult());
     Assert(store.Current() == imported, "Failed imports preserve the active installation");
+    var tarPath = Path.Combine(root, "Compressed backup.tar.gz");
+    using (var target = File.Create(tarPath))
+    using (var gzip = new GZipStream(target, CompressionLevel.Fastest))
+        TarFile.CreateFromDirectory(archiveInput, gzip, includeBaseDirectory: true);
+    var tar = ArchiveImport.ImportAsync(store, tarPath, null, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(tar.DisplayName() == "Compressed backup" && store.VerifyForLaunch().Receipt == tar, "Import nested TAR.GZ through the same install store");
+    var linkedTar = Path.Combine(root, "linked.tar");
+    using (var target = File.Create(linkedTar))
+    using (var writer = new TarWriter(target))
+        writer.WriteEntry(new PaxTarEntry(TarEntryType.SymbolicLink, Payload.Required[0]) { LinkName = "/tmp/foreign.pck" });
+    Reject(() => ArchiveImport.ImportAsync(store, linkedTar, null, CancellationToken.None).GetAwaiter().GetResult());
+    Assert(store.Current() == tar, "A linked TAR entry leaves the current installation intact");
     Assert(store.ActivateVersion(receipt.PayloadId) == receipt, "Steam version can replace a ZIP selection");
+    store.RemoveVersion(imported.PayloadId);
+    Assert(!store.InstalledVersions().Contains(imported) && store.Current() == receipt, "Removing an inactive version preserves the active installation");
+    var refusedActiveRemoval = false;
+    try { store.RemoveVersion(receipt.PayloadId); }
+    catch (InvalidOperationException) { refusedActiveRemoval = true; }
+    Assert(refusedActiveRemoval && store.Current() == receipt, "Active installations cannot be removed");
+    var interruptedRemoval = Directory.CreateDirectory(Path.Combine(root, "remove-" + Guid.NewGuid().ToString("N")));
+    var pendingRemoval = Directory.CreateDirectory(Path.Combine(root, "remove-9-" + Guid.NewGuid().ToString("N")));
+    store.CompleteVersionRemovals();
+    Assert(interruptedRemoval.Exists && !Directory.Exists(pendingRemoval.FullName), "Retry removes only directories with a valid staged removal name");
+    Assert(PayloadStorage.RemainingBytes(root, [("cache-test", 10), ("missing", 5), ("cache-test", 2)]) == 12,
+        "Storage preflight credits partial data and caps reuse at the target size");
+    PayloadStorage.EnsureCapacity(11, 11);
+    PayloadStorage.EnsureCapacity(11, null);
+    Reject(() => PayloadStorage.EnsureCapacity(11, 10));
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");

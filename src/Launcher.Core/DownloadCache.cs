@@ -61,7 +61,7 @@ public sealed class TransferMeter(long total)
     }
 }
 
-public readonly record struct ChunkExtent(ulong Offset, uint Length, byte[] Hash);
+public readonly record struct ChunkExtent(ulong Offset, uint Length, byte[]? Hash);
 
 public static class ChunkLayout
 {

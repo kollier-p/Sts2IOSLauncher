@@ -150,6 +150,8 @@ public sealed class SteamSession : IAsyncDisposable
         // Serialize installers across sessions; the OS releases this lock on process exit.
         using var installLock = store.AcquireWriteLock();
         var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
+        var remaining = PayloadStorage.RemainingBytes(staging, selected.Select(x => (x.Path, (long)x.File.TotalSize)));
+        PayloadStorage.EnsureCapacity(store.Root, remaining);
         Directory.CreateDirectory(staging);
         var progressLock = new object();
         var meter = new TransferMeter(total);

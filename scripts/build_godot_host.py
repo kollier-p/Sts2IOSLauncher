@@ -2,6 +2,7 @@
 """Export the pinned Godot host and embed the independently built runtime."""
 import argparse, hashlib, pathlib, plistlib, re, shutil, subprocess, zipfile, sys
 from integrate_extensions import embed_extensions, link_host_callback
+from build_extension_fixtures import build_extension_fixtures
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 WORK=ROOT/".native-build"
 def run(*args): subprocess.run([str(a) for a in args],check=True)
@@ -13,9 +14,13 @@ def fetch(name,url,sha):
     return p
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--extensions", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--extensions", action="store_true")
+    mode.add_argument("--extension-fixtures", action="store_true")
     args = parser.parse_args()
     WORK.mkdir(exist_ok=True)
+    variant = WORK / "extension-fixture-app" if args.extension_fixtures else WORK / "licensed-app" if args.extensions else WORK
+    variant.mkdir(exist_ok=True)
     release="https://github.com/godotengine/godot/releases/download/4.5.1-stable/"
     editor=fetch("godot-mono.zip",release+"Godot_v4.5.1-stable_mono_macos.universal.zip","f00ee565e9d3682584117ef8865f5ff6d8f571fbf2733075ee06b9e0953261b8")
     templates=fetch("godot-templates.tpz",release+"Godot_v4.5.1-stable_mono_export_templates.tpz","c425633061bb49f4390bdcece2b9ce68b3b0be3c71095b40644d8f6f17b1146e")
@@ -24,7 +29,7 @@ def main():
     template=tools/"ios.zip"
     if not template.exists():
         with zipfile.ZipFile(templates) as z,z.open("templates/ios.zip") as src,template.open("wb") as dst:shutil.copyfileobj(src,dst)
-    project=WORK/"godot-project";out=WORK/"godot-export"
+    project=variant/"godot-project";out=variant/"godot-export"
     for p in (project,out):
         if p.exists():shutil.rmtree(p)
         p.mkdir()
@@ -46,15 +51,22 @@ def main():
     with dummy.open("a") as f:f.write('\n#include "HostGate.mm"\n')
     metadata=plistlib.loads(info.read_bytes())
     metadata.update({"godot_cmdline":["--main-pack","user://StS2.pck"],"CFBundleDisplayName":"STS2 Launcher","UIFileSharingEnabled":True,"LSSupportsOpeningDocumentsInPlace":True,"NSLocalNetworkUsageDescription":"Find local multiplayer games."})
+    if args.extension_fixtures:
+        metadata.update({"CFBundleDisplayName": "STS2 CI Fixture", "STS2ExtensionFixtures": True})
     info.write_bytes(plistlib.dumps(metadata))
-    if args.extensions:
+    if args.extensions or args.extension_fixtures:
         link_host_callback(xproj)
         shutil.copy2(ROOT/"native/ExtensionSupport.mm",src/"ExtensionSupport.mm")
-        with dummy.open("a") as f:f.write('\n#include "ExtensionSupport.mm"\n')
+        with dummy.open("a") as f:
+            if args.extension_fixtures:
+                f.write('\n#define STS2_EXTENSION_FIXTURES 1\n')
+            f.write('\n#include "ExtensionSupport.mm"\n')
     else:
         with dummy.open("a") as f:f.write('\nextern "C" __attribute__((visibility("default"),used)) int sts2_extensions_available() { return 0; }\n')
-    run("xcodebuild","-project",xproj,"-scheme","Sts2Host","-configuration","Release","-destination","generic/platform=iOS","-derivedDataPath",WORK/"godot-derived","CODE_SIGNING_ALLOWED=NO","CODE_SIGNING_REQUIRED=NO","DEVELOPMENT_TEAM=","build")
-    app=WORK/"godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
+    derived=variant/"godot-derived"
+    app=derived/"Build/Products/Release-iphoneos/Sts2Host.app"
+    if app.exists(): shutil.rmtree(app)
+    run("xcodebuild","-project",xproj,"-scheme","Sts2Host","-configuration","Release","-destination","generic/platform=iOS","-derivedDataPath",derived,"CODE_SIGNING_ALLOWED=NO","CODE_SIGNING_REQUIRED=NO","DEVELOPMENT_TEAM=","build")
     if not app.is_dir():raise SystemExit("Godot application missing")
     distribution=WORK/"runtime-distribution"
     if (app/"Managed").exists():shutil.rmtree(app/"Managed")
@@ -63,10 +75,15 @@ def main():
     shutil.copytree(distribution/"Frameworks",frameworks,dirs_exist_ok=True)
     if args.extensions:
         embed_extensions(frameworks, WORK/"extensions")
+    elif args.extension_fixtures:
+        fixtures = variant / "inputs"
+        build_extension_fixtures(fixtures)
+        embed_extensions(frameworks, fixtures, fixtures=True)
     fw=frameworks/"sts2.framework";fw.mkdir(exist_ok=True)
     shutil.copy2(WORK/"framework/sts2",fw/"sts2")
     (fw/"Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable":"sts2","CFBundleIdentifier":"org.sts2mobile.ioslauncher.runtime","CFBundlePackageType":"FMWK","CFBundleVersion":"1","CFBundleShortVersionString":"1.0","MinimumOSVersion":"16.0"}))
-    run(sys.executable,ROOT/"scripts/validate_native_app.py",app,"--extensions" if args.extensions else "--diagnostic")
+    mode = "--extension-fixtures" if args.extension_fixtures else "--extensions" if args.extensions else "--diagnostic"
+    run(sys.executable,ROOT/"scripts/validate_native_app.py",app,mode,"--report",variant/"pre-ipa-report.json")
     if any(out.glob("*.ipa")):
         raise SystemExit("Godot's project-only export unexpectedly created an IPA")
     print("Pre-IPA build complete: "+str(app),flush=True)

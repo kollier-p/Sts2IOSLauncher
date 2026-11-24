@@ -2,6 +2,8 @@
 import pathlib,plistlib,subprocess,sys,zipfile
 app=pathlib.Path(sys.argv[1]).resolve()
 info=plistlib.loads((app/"Info.plist").read_bytes())
+if info.get("STS2ExtensionFixtures"):
+    raise SystemExit("The extension test fixture cannot be packaged.")
 subprocess.run(["xcrun","lipo","-verify_arch","arm64",app/info["CFBundleExecutable"]],check=True)
 subprocess.run(["xcrun","lipo","-verify_arch","arm64",app/"Frameworks/sts2.framework/sts2"],check=True)
 for item in app.rglob("*"):

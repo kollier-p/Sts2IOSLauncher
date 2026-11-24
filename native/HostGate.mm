@@ -68,6 +68,8 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) NSURL *scopedArchive;
 @property(nonatomic,assign) int64_t shownPromptId;
 @property(nonatomic,assign) BOOL initialized, initializing;
+@property(nonatomic,assign) BOOL waitingForSteam;
+@property(nonatomic,assign) UIBackgroundTaskIdentifier steamBackgroundTask;
 - (void)tick;
 @end
 static LauncherGate *gate;
@@ -104,6 +106,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.view.backgroundColor=UIColor.systemBackgroundColor;
+    self.steamBackgroundTask=UIBackgroundTaskInvalid;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamDidEnterBackground:)
+        name:UIApplicationDidEnterBackgroundNotification object:self.application];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamDidBecomeActive:)
+        name:UIApplicationDidBecomeActiveNotification object:self.application];
     UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";heading.font=[UIFont boldSystemFontOfSize:30];
     self.installation=[UILabel new];self.installation.text=@"No game installed";self.installation.textColor=UIColor.secondaryLabelColor;
     self.account=[self field:@"Steam account name" secure:NO];self.password=[self field:@"Steam password" secure:YES];
@@ -118,7 +125,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.saved=[self button:@"Use saved Steam session" action:@selector(savedPressed)];
     self.forget=[self button:@"Forget saved Steam session" action:@selector(forgetPressed)];
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
-    self.importGame=[self button:@"Import game ZIP" action:@selector(importPressed)];
+    self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
@@ -172,6 +179,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSDictionary *state=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if(![state isKindOfClass:NSDictionary.class])return;
     NSString *stage=state[@"Stage"];NSString *message=state[@"Message"];
+    self.waitingForSteam=[stage isEqual:@"auth"] || ([stage isEqual:@"prompt"] &&
+        [@[@"confirm",@"code"] containsObject:state[@"Prompt"]]);
+    if(!self.waitingForSteam) [self endSteamBackgroundTask];
     BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];
     NSString *installed=[state[@"Installed"] isKindOfClass:NSString.class]?state[@"Installed"]:nil;
     self.installation.text=installed?[NSString stringWithFormat:@"Installed: %@",installed]:@"No game installed";
@@ -182,6 +192,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
     self.progress.progress=total>0?done/total:0;
     if(total>0) message=[message stringByAppendingFormat:@"\n%.1f / %.1f MiB",done/1048576,total/1048576];
+    else if(done>0) message=[message stringByAppendingFormat:@"\n%.1f MiB imported",done/1048576];
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];
     self.message.text=message;
@@ -194,6 +205,20 @@ static void forward(id service,SEL selector,UIApplication *application) {
         if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
         else{self.message.text=@"Godot startup failed. Restart the app.";}
     }
+}
+- (void)steamDidEnterBackground:(NSNotification *)notification {
+    if(!self.waitingForSteam || self.steamBackgroundTask!=UIBackgroundTaskInvalid) return;
+    __weak LauncherGate *weakGate=self;
+    self.steamBackgroundTask=[self.application beginBackgroundTaskWithName:@"Steam Guard" expirationHandler:^{
+        [weakGate endSteamBackgroundTask];
+    }];
+}
+- (void)steamDidBecomeActive:(NSNotification *)notification { [self endSteamBackgroundTask]; }
+- (void)endSteamBackgroundTask {
+    if(self.steamBackgroundTask==UIBackgroundTaskInvalid) return;
+    UIBackgroundTaskIdentifier task=self.steamBackgroundTask;
+    self.steamBackgroundTask=UIBackgroundTaskInvalid;
+    [self.application endBackgroundTask:task];
 }
 - (void)showPrompt:(NSDictionary*)state {
     NSString *kind=state[@"Prompt"],*message=state[@"Message"];
@@ -238,7 +263,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)versionsPressed { [self.view endEditing:YES];if(browseVersions()!=0)[self showError:@"Another operation is active."]; }
 - (void)importPressed {
     [self.view endEditing:YES];
-    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:NO];
+    NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
+    for(NSString *extension in @[@"tar",@"gz",@"tgz"]){
+        UTType *type=[UTType typeWithFilenameExtension:extension];
+        if(type && ![types containsObject:type]) [types addObject:type];
+    }
+    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
     picker.delegate=self;
     [self presentViewController:picker animated:YES completion:nil];
 }
@@ -247,7 +277,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if([archive startAccessingSecurityScopedResource])self.scopedArchive=archive;
     if(beginImport(archive.fileSystemRepresentation)!=0){
         [self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;
-        [self showError:@"Unable to open the selected ZIP."];
+        [self showError:@"Unable to open the selected game archive."];
     }
 }
 - (void)downloadPressed { [self startDownload:NO]; }

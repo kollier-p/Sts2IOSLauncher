@@ -45,9 +45,11 @@ def verify_framework(app, name, *symbols):
     verify_symbols(executable, *symbols)
 
 
-def validate(app, extensions):
+def validate(app, extensions, fixtures):
     info = plistlib.loads((app / "Info.plist").read_bytes())
     binary = app / info["CFBundleExecutable"]
+    if bool(info.get("STS2ExtensionFixtures")) != fixtures:
+        raise SystemExit("App extension fixture marker differs from the build mode")
     if info.get("MinimumOSVersion") != "16.0" or info.get("godot_cmdline") != ["--main-pack", "user://StS2.pck"]:
         raise SystemExit("Godot launch arguments or deployment target differ from the launcher contract")
     verify_device_binary(binary)
@@ -64,16 +66,22 @@ def validate(app, extensions):
         with (app / "Managed" / f"{name}.dll").open("rb") as assembly:
             if assembly.read(2) != b"MZ":
                 raise SystemExit(f"Invalid managed assembly: {name}")
-    if extensions:
+    if extensions or fixtures:
         verify_symbols(binary, "_load_all_fmod_plugins")
         verify_framework(app, FMOD_NAME, "_fmod_library_init", "_FMOD_System_Create", "_FMOD_Studio_System_Create")
         verify_framework(app, SPINE_NAME, "_spine_godot_library_init")
+        fmod = app / "Frameworks" / f"{FMOD_NAME}.framework" / FMOD_NAME
+        imports = inspect("nm", "-gu", fmod).split()
+        if "_load_all_fmod_plugins" not in imports:
+            raise SystemExit(f"Missing FMOD host callback import: {fmod}")
+    elif any((app / "Frameworks" / f"{name}.framework").exists() for name in (FMOD_NAME, SPINE_NAME)):
+        raise SystemExit("Unexpected extension frameworks in the diagnostic app")
     for item in app.rglob("*"):
         if item.name.lower() in {"sts2.dll", "0harmony.dll", "slaythespire2.pck", "release_info.json",
                                  "embedded.mobileprovision"} or item.is_symlink():
             raise SystemExit(f"Unexpected entry in pre-IPA app: {item}")
     return {"bundle": info["CFBundleIdentifier"], "minimum_os": info["MinimumOSVersion"],
-            "extensions": extensions, "architecture": "arm64", "platform": "iPhoneOS",
+            "extensions": extensions, "extension_fixtures": fixtures, "architecture": "arm64", "platform": "iPhoneOS",
             "status": "compiled and staged; device untested"}
 
 
@@ -83,7 +91,9 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--extensions", action="store_true")
     mode.add_argument("--diagnostic", action="store_true")
+    mode.add_argument("--extension-fixtures", action="store_true")
+    parser.add_argument("--report", type=pathlib.Path, default=pathlib.Path(".native-build/pre-ipa-report.json"))
     args = parser.parse_args()
-    result = json.dumps(validate(args.app, args.extensions), indent=2)
-    pathlib.Path(".native-build/pre-ipa-report.json").write_text(result + "\n")
+    result = json.dumps(validate(args.app, args.extensions, args.extension_fixtures), indent=2)
+    args.report.write_text(result + "\n")
     print(result)

@@ -47,11 +47,12 @@ def embed_framework(frameworks, name, source, identifier, version):
     }))
 
 
-def embed_extensions(frameworks, extensions):
+def embed_extensions(frameworks, extensions, *, fixtures=False):
     embed_framework(frameworks, FMOD_NAME, extensions / "fmod" / f"{FMOD_NAME}.dylib", "fmod", "6.1.0")
     spine = extensions / "spine" / f"{SPINE_SOURCE}.framework" / SPINE_SOURCE
     embed_framework(frameworks, SPINE_NAME, spine, "spine", "4.2.0")
-    shutil.copy2(extensions / "spine" / "LICENSE", frameworks / f"{SPINE_NAME}.framework" / "Spine-LICENSE.txt")
+    if not fixtures:
+        shutil.copy2(extensions / "spine" / "LICENSE", frameworks / f"{SPINE_NAME}.framework" / "Spine-LICENSE.txt")
 
 
 if __name__ == "__main__":

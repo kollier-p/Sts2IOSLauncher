@@ -183,9 +183,9 @@ public static class Entry
     {
         var path = Str(input);
         if (!Path.IsPathFullyQualified(path)) return -2;
-        return Start("Archive import", new("import", "Opening game ZIP…"), async (payloads, ct) =>
+        return Start("Archive import", new("import", "Opening game archive…"), async (payloads, ct) =>
         {
-            var receipt = await ArchiveImport.ImportZipAsync(payloads, path,
+            var receipt = await ArchiveImport.ImportAsync(payloads, path,
                 (done, total) => Publish(new("import", "Importing game files…", done, total)), ct);
             return SetCurrent(receipt, "Archive installation complete.");
         }) ? 0 : -1;
@@ -195,6 +195,9 @@ public static class Entry
     public static int BrowseVersions() => Start("Version selection", new("versions", "Reading installed versions…"),
         async (payloads, ct) =>
         {
+            try { payloads.CompleteVersionRemovals(ct); }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
+            { HostDiagnostics.Error("finish removing version", error); }
             var installations = payloads.InstalledVersions();
             var choices = installations.Select(receipt => new Choice(receipt.PayloadId,
                 receipt.DisplayName(), receipt.InventorySha256 is null ? "Reinstall required" :
@@ -204,8 +207,23 @@ public static class Entry
             var selection = await Ask("version", "Installed versions", ct, choices);
             var selected = installations.SingleOrDefault(receipt => receipt.PayloadId == selection);
             if (selected is null) throw new InvalidDataException("Invalid installed version selection.");
-            if (selected.InventorySha256 is null) return new("error", "Reinstall this version to verify all its game files.");
             if (selection == current?.PayloadId) return new("idle", "Selected version is already active.");
+            var actions = new List<Choice>();
+            if (selected.InventorySha256 is not null)
+                actions.Add(new("activate", "Make active", "Verify the game files and switch to this version"));
+            actions.Add(new("remove", "Remove version", "Delete this inactive installation"));
+            var action = await Ask("version-action", selected.DisplayName(), ct, actions.ToArray());
+            if (action == "remove")
+            {
+                var confirmation = await Ask("remove-version", "Remove this game version?", ct,
+                    [new("keep", "Keep version", "Return to the launcher"), new("remove", "Remove version", selected.DisplayName())]);
+                if (confirmation != "remove") return new("idle", "Version kept.");
+                Publish(new("remove", "Removing the inactive installation…"));
+                payloads.RemoveVersion(selection, ct);
+                return new("idle", "Inactive version removed.");
+            }
+            if (action != "activate" || selected.InventorySha256 is null)
+                throw new InvalidDataException("Invalid version action.");
             Publish(new("verify", "Verifying selected installation…"));
             return SetCurrent(payloads.ActivateVersion(selection, ct), "Selected version is ready to play.");
         }) ? 0 : -1;
@@ -233,6 +251,15 @@ public static class Entry
             State result;
             try { result = await run(payloads, cts.Token); }
             catch (OperationCanceledException) { result = new("idle", "Operation cancelled."); }
+            catch (InsufficientStorageException error)
+            {
+                const double MiB = 1024.0 * 1024;
+                result = new("error", $"This operation needs {Math.Ceiling(error.RequiredBytes / MiB):N0} MiB of free space. {Math.Floor(error.AvailableBytes / MiB):N0} MiB is available.");
+            }
+            catch (NotSupportedException) when (operation == "Archive import")
+            {
+                result = new("error", "Choose a ZIP, TAR, or gzip-compressed TAR archive.");
+            }
             catch (Exception error)
             {
                 HostDiagnostics.Error(operation, error);
@@ -304,7 +331,11 @@ public static class Entry
         var temporary = pack + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            if (NativeClone(plan.Pack, temporary, 0) != 0) File.Copy(plan.Pack, temporary);
+            if (NativeClone(plan.Pack, temporary, 0) != 0)
+            {
+                PayloadStorage.EnsureCapacity(documents, new FileInfo(plan.Pack).Length);
+                File.Copy(plan.Pack, temporary);
+            }
             PckScripts.Add(temporary, plan.GameAssembly, ct);
             PckExtensions.Patch(temporary, ct);
             ct.ThrowIfCancellationRequested();
@@ -357,7 +388,11 @@ public static class Entry
         public Task<string> GetEmailCodeAsync(string email, bool previousCodeWasIncorrect) => Ask("code",
             previousCodeWasIncorrect ? "Incorrect email code" : "Steam Guard email code", ct);
 
-        public async Task<bool> AcceptDeviceConfirmationAsync() =>
-            await Ask("confirm", "Approve in the Steam app or enter a code.", ct) == "approve";
+        public async Task<bool> AcceptDeviceConfirmationAsync()
+        {
+            if (await Ask("confirm", "Approve in the Steam app or enter a code.", ct) != "approve") return false;
+            Publish(new("auth", "Waiting for Steam Guard approval…"));
+            return true;
+        }
     }
 }

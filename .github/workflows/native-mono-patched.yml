@@ -15,6 +15,7 @@ on:
       - 'scripts/validate_native_app.py'
       - 'scripts/stage_extensions.py'
       - 'scripts/integrate_extensions.py'
+      - 'scripts/build_extension_fixtures.py'
       - 'src/**'
       - '.github/workflows/native-mono-patched.yml'
 permissions:
@@ -61,6 +62,9 @@ jobs:
           args=()
           if [ "$INCLUDE_EXTENSIONS" = "true" ]; then args+=(--extensions); fi
           python3 scripts/build_godot_host.py "${args[@]}"
+      - name: Compile Godot with extension integration fixtures
+        if: inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
+        run: python3 scripts/build_godot_host.py --extension-fixtures
       - name: Preserve pre-IPA build output
         if: inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
         run: |
@@ -73,6 +77,7 @@ jobs:
           path: |
             .native-build/staged-app.tar.gz
             .native-build/pre-ipa-report.json
+            .native-build/extension-fixture-app/pre-ipa-report.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

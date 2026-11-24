@@ -8,6 +8,8 @@ The extension-enabled build stages ARM64 FMOD and Spine frameworks inside the `.
 
 The automatic build uploads the diagnostic `.app` as a tar archive. IPA packaging is a separate step and is outside the pre-IPA workflow.
 
+Automatic CI also builds an app with two small test libraries to check the extension framework layout, install names and exported symbols. The test app disables Play and stays on the runner. Its validation report accompanies the diagnostic app artifact.
+
 On the iPad, sideload/sign the IPA with the installed jailbreak-compatible method, launch and enable JIT if needed, sign in to Steam, select a branch and download, then select Play installed game. Device launch and gameplay are not yet verified. Report the exact build SHA, iPad model/OS and the logs under Documents/LauncherLogs. Do not share credentials or tokens.
 
 Known remaining limits: actual game/API compatibility across branches, extension linkage and redistribution authorization, Steam networking/cloud/workshop, save/profile selection, Android touch and UI patches, and real device testing. A successful CI compilation is not a gameplay result.

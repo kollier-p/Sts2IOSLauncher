@@ -6,5 +6,9 @@ extern "C" __attribute__((visibility("default"), used)) unsigned int *load_all_f
 }
 
 extern "C" __attribute__((visibility("default"), used)) int sts2_extensions_available() {
+#ifdef STS2_EXTENSION_FIXTURES
+    return 0;
+#else
     return 1;
+#endif
 }
