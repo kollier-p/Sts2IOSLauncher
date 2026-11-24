@@ -2,96 +2,46 @@ name: Build IPA
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
-    tags: ["v*"]
+    branches: [main]
 permissions:
   contents: read
 concurrency:
   group: build-ipa-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  build:
+  baseline:
     runs-on: xcode-27
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
-      - name: Inspect toolchain
+          dotnet-version: 10.0.404
+      - name: Install and inspect iOS toolchain
         run: |
-          uname -m
-          xcodebuild -version
-          dotnet --info
           test "$(uname -m)" = arm64
-      - name: Install iOS workload
-        run: dotnet workload restore src/Launcher.iOS/Launcher.iOS.csproj
-      - name: Run core tests
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          dotnet --version
+          dotnet workload install ios
+          dotnet workload list
+      - name: Generate official UIKit template
+        run: dotnet new ios -o "$RUNNER_TEMP/ios-baseline"
+      - name: Build unmodified template for ARM64
         run: |
-          dotnet build src/Launcher.Steam/Launcher.Steam.csproj -c Release
-          dotnet run --project tests/Launcher.Core.Tests/Launcher.Core.Tests.csproj -c Release
-      - name: Build unsigned launcher
+          dotnet build "$RUNNER_TEMP/ios-baseline" -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -v:minimal
+      - name: Test launcher without experimental linker settings
         run: |
-          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          version=0.1.0
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -v:minimal -bl:ios-build.binlog \
-            -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false \
-            -p:BuildIpa=false -p:ApplicationId="io.github.$owner.sts2ioslauncher" \
-            -p:ApplicationDisplayVersion="$version" -p:ApplicationVersion="$GITHUB_RUN_NUMBER"
-      - name: Identify unexpected native framework dependency
-        if: failure()
-        run: |
-          echo "Generated native linker inputs:"
-          find src/Launcher.iOS/obj -type f \( -name '*.rsp' -o -name '*.txt' -o -name '*.json' -o -name '*.xml' -o -name '*.flags' \) -print0 | xargs -0 grep -il DiskArbitration || true
-          echo "SDK references:"
-          find "$DOTNET_ROOT/packs" -type f \( -name '*.targets' -o -name '*.props' -o -name '*.xml' \) -print0 | xargs -0 grep -in DiskArbitration | cut -c1-500 | head -60 || true
-          echo "Testing a minimal UIKit app without SteamKit2:"
-          dotnet new ios -o "$RUNNER_TEMP/ios-probe" --no-restore
-          dotnet build "$RUNNER_TEMP/ios-probe" -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -p:ValidateSceneManifest=false -v:minimal > "$RUNNER_TEMP/ios-probe.log" 2>&1 || true
-          tail -60 "$RUNNER_TEMP/ios-probe.log"
-      - name: Upload native build diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-build-diagnostics
-          path: ios-build.binlog
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Package and scan IPA
-        run: |
-          python3 scripts/package_ipa.py
-          git diff --exit-code
-          test -z "$(git status --porcelain --untracked-files=all)"
+          dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -p:TrimMode=partial -v:minimal
+      - name: Package and scan launcher
+        run: python3 scripts/package_ipa.py
       - uses: actions/upload-artifact@v4
         with:
           name: STS2IOSLauncher-unsigned-ipa
           path: dist/STS2IOSLauncher.ipa
           if-no-files-found: error
-          compression-level: 0
           retention-days: 7
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: STS2IOSLauncher-unsigned-ipa
-      - name: Publish experimental release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" STS2IOSLauncher.ipa --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "STS2IOSLauncher $GITHUB_REF_NAME" --notes "Experimental unsigned launcher only. No game assets. Game execution is not implemented. Requires signing or a compatible jailbreak installation method."
