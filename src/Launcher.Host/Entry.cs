@@ -471,6 +471,171 @@ public static class Entry
             return new("idle", upload ? $"Uploaded {result.Transferred} save files to Steam Cloud." : $"Downloaded {result.Transferred} Steam Cloud save files.");
         }) ? 0 : -1;
 
+    static ModLibrary ActiveMods()
+    {
+        var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
+        return new ModLibrary(profiles!.EnsureDirectories(profile).ModsDirectory);
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BeginModImport(nint input)
+    {
+        var path = Str(input);
+        if (!Path.IsPathFullyQualified(path)) return -2;
+        return Start("Mod import", new("mods", "Checking mod archive…"),
+            (_, ct) => ImportModAsync(ActiveMods(), path, ct)) ? 0 : -1;
+    }
+
+    static async Task<State> ImportModAsync(ModLibrary library, string path, CancellationToken ct, string? label = null)
+    {
+        using var incoming = await library.PrepareZipAsync(path, ct, label);
+        var previous = library.Replacement(incoming);
+        if (previous is not null)
+        {
+            var decision = await Ask("mod-replacement", "Replace the installed mod package?", ct,
+                [new("keep", "Keep installed package", previous.Label), new("replace", "Install replacement", incoming.Label)]);
+            if (decision != "replace") return new("idle", "Installed mod package kept.");
+        }
+        Publish(new("mods", "Installing mod package…"));
+        var installed = library.Install(incoming, previous is not null, ct);
+        return new("idle", $"Installed {installed.Label}.");
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseMods() => Start("Mod management", new("mods", "Reading installed mods…"),
+        async (_, ct) =>
+        {
+            var library = ActiveMods();
+            var installed = library.List();
+            var choices = installed.Select(mod => new Choice(mod.Key, mod.Label,
+                $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")).ToArray();
+            if (choices.Length == 0) return new("idle", "Import a mod ZIP to get started.");
+            var selected = await Ask("mod", "Installed mod packages", ct, choices);
+            var mod = installed.SingleOrDefault(item => item.Key == selected)
+                ?? throw new InvalidDataException("The selected mod is unavailable.");
+            var action = await Ask("mod-action", mod.Label, ct,
+                [new("toggle", mod.Enabled ? "Disable package" : "Enable package", "Apply to the selected profile's mod directory"),
+                 new("remove", "Remove package", "Delete the files installed with this package")]);
+            ct.ThrowIfCancellationRequested();
+            if (action == "toggle")
+            {
+                library.SetEnabled(selected, !mod.Enabled);
+                return new("idle", mod.Enabled ? "Mod package disabled." : "Mod package enabled.");
+            }
+            if (action != "remove") throw new InvalidDataException("Invalid mod action.");
+            var confirmation = await Ask("remove-mod", "Remove this mod package?", ct,
+                [new("keep", "Keep package", "Return to the launcher"), new("remove", "Remove package", mod.Label)]);
+            if (confirmation != "remove") return new("idle", "Mod package kept.");
+            ct.ThrowIfCancellationRequested();
+            library.Remove(selected);
+            return new("idle", "Mod package removed.");
+        }) ? 0 : -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseWorkshop() => Start("Steam Workshop", new("mods", "Opening Steam Workshop…"),
+        async (_, ct) =>
+        {
+            var input = await Ask("workshop-id", "Enter a Workshop item ID or Steam Community link", ct);
+            var id = WorkshopFiles.ParseId(input);
+            if (id is null) return new("error", "Enter a Steam Workshop item ID or link.");
+            Publish(new("mods", "Reading Workshop item…"));
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
+            var workshop = new WorkshopFiles(http);
+            var item = await workshop.LookupAsync(id.Value, ct);
+            if (item.Download is null)
+                return new("error", "Steam offers no public ZIP for this item. SteamPipe Workshop downloads are pending.");
+            var action = await Ask("workshop-install", item.Title, ct,
+                [new("cancel", "Cancel", "Return to the launcher"), new("install", "Download and import", $"Workshop item {item.Id}")]);
+            if (action != "install") return new("idle", "Workshop import cancelled.");
+            var staging = Directory.CreateTempSubdirectory("sts2-workshop-").FullName;
+            try
+            {
+                var path = Path.Combine(staging, $"{item.Id}.zip");
+                Publish(new("mods", "Downloading Workshop archive…"));
+                await workshop.DownloadZipAsync(item, path, ct);
+                return await ImportModAsync(ActiveMods(), path, ct, item.Title);
+            }
+            finally { Directory.Delete(staging, recursive: true); }
+        }) ? 0 : -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseNexus() => Start("Nexus Mods", new("mods", "Opening Nexus Mods…"), BrowseNexusAsync) ? 0 : -1;
+
+    static async Task<State> BrowseNexusAsync(PayloadStore _, CancellationToken ct)
+    {
+        var key = NexusVault.Load();
+        var actions = new List<Choice>();
+        if (key is not null)
+        {
+            actions.Add(new("browse", "Browse or look up a mod", "Browse recent and trending mods or enter a mod page link"));
+            actions.Add(new("authorized", "Use a Nexus download link", "Paste the link from a requested mod manager download"));
+        }
+        actions.Add(new("configure", key is null ? "Set API key" : "Replace API key", "Save a personal Nexus API key in Keychain"));
+        if (key is not null) actions.Add(new("forget", "Forget API key", "Remove the saved Nexus key"));
+        var action = await Ask("nexus-action", "Nexus Mods", ct, actions.ToArray());
+        if (action == "forget")
+            return NexusVault.Clear() == 0 ? new("idle", "Nexus API key removed.") : new("error", "Could not remove the Nexus API key.");
+        using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
+        if (action == "configure")
+        {
+            key = (await Ask("nexus-key", "Enter your personal Nexus Mods API key", ct)).Trim();
+            if (key.Length is 0 or > 2048 || key.Any(character => character <= ' ' || character > '~'))
+                return new("error", "Enter a valid Nexus API key.");
+            Publish(new("mods", "Validating your Nexus API key…"));
+            try { await new NexusMods(http, key).ValidateAsync(ct); }
+            catch (HttpRequestException error) when (error.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            { return new("error", "Nexus rejected this API key."); }
+            NexusVault.Save(key);
+            return new("idle", "Nexus API key saved. Open Nexus Mods to browse or import a download link.");
+        }
+        if (key is null) return new("error", "Set your Nexus Mods API key first.");
+        var nexus = new NexusMods(http, key);
+        NexusMod mod;
+        NexusModFile file;
+        NexusDownloadToken? authorization = null;
+        if (action == "authorized")
+        {
+            authorization = NexusMods.ParseNxm(await Ask("nexus-link", "Paste your authorized nxm download link", ct));
+            if (authorization is null) return new("error", "Enter an authorized Slay the Spire 2 Nexus download link.");
+            Publish(new("mods", "Reading Nexus file details…"));
+            mod = await nexus.LookupAsync(authorization.ModId, ct);
+            file = (await nexus.FilesAsync(mod.Id, ct)).SingleOrDefault(item => item.Id == authorization.FileId)
+                ?? throw new InvalidDataException("Nexus no longer lists this file.");
+        }
+        else if (action == "browse")
+        {
+            var query = (await Ask("nexus-query", "Enter a mod name, ID, or page link. Leave blank to browse recent and trending mods.", ct)).Trim();
+            Publish(new("mods", "Reading Nexus Mods catalog…"));
+            var matches = await nexus.SearchAsync(query, ct);
+            if (matches.Count == 0) return new("idle", "No recent or trending mods match. Look up a mod by its page link to search the full catalog.");
+            var selected = await Ask("nexus-mod", "Choose a Nexus mod", ct,
+                matches.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Name, item.Summary)).ToArray());
+            mod = matches.Single(item => item.Id.ToString(CultureInfo.InvariantCulture) == selected);
+            Publish(new("mods", "Reading Nexus file details…"));
+            var files = await nexus.FilesAsync(mod.Id, ct);
+            if (files.Count == 0) return new("idle", "Nexus has no files for this mod.");
+            var selectedFile = await Ask("nexus-file", mod.Name, ct,
+                files.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Name, item.Version)).ToArray());
+            file = files.Single(item => item.Id.ToString(CultureInfo.InvariantCulture) == selectedFile);
+        }
+        else return new("error", "Choose a Nexus action.");
+
+        var confirmation = await Ask("nexus-install", "Download and import this Nexus file?", ct,
+            [new("cancel", "Cancel", "Return to the launcher"), new("install", mod.Name, file.Name)]);
+        if (confirmation != "install") return new("idle", "Nexus import cancelled.");
+        var staging = Directory.CreateTempSubdirectory("sts2-nexus-").FullName;
+        try
+        {
+            var path = Path.Combine(staging, $"{file.Id}.zip");
+            Publish(new("mods", "Downloading Nexus archive…"));
+            try { await nexus.DownloadAsync(mod.Id, file.Id, authorization, path, ct); }
+            catch (HttpRequestException error) when (error.StatusCode is System.Net.HttpStatusCode.Forbidden)
+            { return new("error", "Nexus denied the request. Open the mod page and request a mod manager download link."); }
+            return await ImportModAsync(ActiveMods(), path, ct, mod.Name);
+        }
+        finally { Directory.Delete(staging, recursive: true); }
+    }
+
     static bool Start(string operation, State pending, Func<PayloadStore, CancellationToken, Task<State>> run)
     {
         CancellationTokenSource cts;
@@ -496,6 +661,10 @@ public static class Entry
             catch (NotSupportedException) when (operation == "Archive import")
             {
                 result = new("error", "Choose a ZIP, TAR, or gzip-compressed TAR archive.");
+            }
+            catch (NotSupportedException) when (operation == "Mod import")
+            {
+                result = new("error", "Choose a ZIP containing the mod and its manifest.");
             }
             catch (Exception error)
             {
@@ -559,6 +728,7 @@ public static class Entry
         if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
         var plan = LaunchPlan.Prepare(payloads, documents, ct, activeProfile.PayloadId);
         launchProfilePaths = profiles!.EnsureDirectories(activeProfile);
+        new ModLibrary(launchProfilePaths.ModsDirectory).List();
         var adapter = Path.Combine(Path.GetDirectoryName(payloads.Root)!, "RuntimeAdapters", plan.Receipt.PayloadId);
         Directory.CreateDirectory(adapter);
         var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");

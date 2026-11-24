@@ -10,7 +10,8 @@ Target device is a JIT-enabled 11-inch iPad Pro running iPadOS 17.6.3. Feature c
 | Game startup | Patched ARM64 Mono, Godot handoff, and initial Harmony hooks are integrated. Verify on device with licensed FMOD and Spine frameworks. |
 | Compatibility and input | Local mod paths and initial platform hooks are implemented. Full compatibility pack, touch adaptation, controller behavior, rendering, and audio need device work. |
 | Save management | Manual snapshots, verified restore, WebDAV push and pull, and Steam Cloud upload and download are implemented. Automatic sync and live provider validation remain open. |
-| Launcher utilities | The iPad interface groups Play, Install, and Saves. Persistent diagnostics are implemented. Mod management, Workshop, Nexus, file browser, localization, and settings remain open. |
+| Mod management | Per-profile ZIP imports support manifest normalization, package replacement, enable and disable, and removal. Workshop item IDs and links can import public ZIP downloads. Nexus supports recent and trending feeds, mod lookup, file selection, and authorized download links. SteamPipe Workshop downloads, in-app Workshop browsing, additional archive formats, individual module management, and on-device mod validation remain open. |
+| Launcher utilities | The iPad interface groups Play, Install, Saves, and Mods. Persistent diagnostics are implemented. File browser, localization, and settings remain open. |
 
 The pre-IPA CI gate covers ARM64 compilation, linking and bundle staging; packaging is separate. Readiness for device testing also requires an authorized distribution and signing path. Steam sign-in, installation, and gameplay on a physical iPad are separate verification gates.
 

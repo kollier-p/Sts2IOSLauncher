@@ -260,6 +260,48 @@ try
     Assert(File.ReadAllText(syncFile) == "unsynced local run", "WebDAV conflicts leave live files intact");
     Assert(SyncDav(false, true).Transferred == 1 && File.ReadAllText(syncFile) == "other device run" &&
         new SaveSnapshots(syncRoot, syncBackups).List().Any(backup => backup.Reason == "Before cloud pull"), "Explicit conflict resolution backs up local data first");
+    var modsRoot = Path.Combine(root, "mod-profile", "mods");
+    var mods = new ModLibrary(modsRoot);
+    string CreateModZip(string name, string id, string description)
+    {
+        var path = Path.Combine(root, name + ".zip");
+        using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
+        using (var manifest = new StreamWriter(zip.CreateEntry("module/mod_manifest.json").Open()))
+            manifest.Write(System.Text.Json.JsonSerializer.Serialize(new { id }));
+        using (var pack = zip.CreateEntry("module/TestMod.pck").Open()) pack.Write("GDPC"u8);
+        using (var extra = new StreamWriter(zip.CreateEntry("module/description.txt").Open())) extra.Write(description);
+        return path;
+    }
+    using var firstMod = mods.PrepareZipAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
+    var installedMod = mods.Install(firstMod, replace: false, CancellationToken.None);
+    Assert(File.Exists(Path.Combine(modsRoot, installedMod.Key, "module", "TestMod.json")), "Legacy mod manifests get their expected filename");
+    Assert(!mods.SetEnabled(installedMod.Key, false).Enabled && !Directory.Exists(Path.Combine(modsRoot, installedMod.Key)),
+        "Disabled mods are outside the runtime scan directory");
+    using var secondMod = mods.PrepareZipAsync(CreateModZip("Second mod", "TestMod", "new"), CancellationToken.None).GetAwaiter().GetResult();
+    Assert(mods.Replacement(secondMod)?.Key == installedMod.Key, "A matching package is detected before replacement");
+    var replacementMod = mods.Install(secondMod, replace: true, CancellationToken.None);
+    Assert(!replacementMod.Enabled && replacementMod.Key == installedMod.Key, "Updates preserve enabled state and package identity");
+    mods.SetEnabled(replacementMod.Key, true);
+    Assert(File.ReadAllText(Path.Combine(modsRoot, installedMod.Key, "module", "description.txt")) == "new", "The replacement is made active");
+    mods.Remove(installedMod.Key);
+    Assert(mods.List().Count == 0, "Managed mod removal clears its install directory");
+    Reject(() => mods.PrepareZipAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());
+    using var nexusHandler = new NexusFixture();
+    using var nexusHttp = new HttpClient(nexusHandler);
+    var nexus = new NexusMods(nexusHttp, "fixture");
+    nexus.ValidateAsync(CancellationToken.None).GetAwaiter().GetResult();
+    Assert(NexusMods.ParseModId("https://nexusmods.example/slaythespire2/mods/42") is null &&
+        NexusMods.ParseNxm("nxm://other/mods/42/files/37?key=public%2Bkey&expires=1234") is null,
+        "Nexus lookup and download links are scoped to the game and service");
+    var nexusMod = nexus.SearchAsync("https://www.nexusmods.com/slaythespire2/mods/42", CancellationToken.None).GetAwaiter().GetResult().Single();
+    var nexusFile = nexus.FilesAsync(nexusMod.Id, CancellationToken.None).GetAwaiter().GetResult().Single();
+    var nexusLink = NexusMods.ParseNxm("nxm://slaythespire2/mods/42/files/37?key=public%2Bkey&expires=1234")!;
+    var nexusOutput = Path.Combine(root, "nexus-fixture.zip");
+    Reject(() => nexus.DownloadAsync(42, 38, nexusLink, nexusOutput, CancellationToken.None).GetAwaiter().GetResult());
+    nexus.DownloadAsync(nexusMod.Id, nexusFile.Id, nexusLink, nexusOutput, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(nexusFile.Primary && nexusHandler.Downloaded && new FileInfo(nexusOutput).Length == 3 &&
+        !nexusLink.ToString().Contains(nexusLink.Key, StringComparison.Ordinal),
+        "Nexus imports only the authorized file and keeps the API key and signed download token separate");
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");

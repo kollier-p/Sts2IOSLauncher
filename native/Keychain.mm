@@ -38,6 +38,7 @@ static int clearValue(NSString *service) {
 
 static NSString *const steamService=@"org.sts2mobile.ioslauncher.steam";
 static NSString *const webDavService=@"org.sts2mobile.ioslauncher.webdav";
+static NSString *const nexusService=@"org.sts2mobile.ioslauncher.nexus";
 
 extern "C" __attribute__((visibility("default"))) int sts2_vault_write(const char *json) { return writeValue(steamService, json); }
 extern "C" __attribute__((visibility("default"))) int sts2_vault_read(char *buffer, int capacity) { return readValue(steamService, buffer, capacity); }
@@ -45,3 +46,6 @@ extern "C" __attribute__((visibility("default"))) int sts2_vault_clear() { retur
 extern "C" __attribute__((visibility("default"))) int sts2_webdav_write(const char *json) { return writeValue(webDavService, json); }
 extern "C" __attribute__((visibility("default"))) int sts2_webdav_read(char *buffer, int capacity) { return readValue(webDavService, buffer, capacity); }
 extern "C" __attribute__((visibility("default"))) int sts2_webdav_clear() { return clearValue(webDavService); }
+extern "C" __attribute__((visibility("default"))) int sts2_nexus_write(const char *json) { return writeValue(nexusService, json); }
+extern "C" __attribute__((visibility("default"))) int sts2_nexus_read(char *buffer, int capacity) { return readValue(nexusService, buffer, capacity); }
+extern "C" __attribute__((visibility("default"))) int sts2_nexus_clear() { return clearValue(nexusService); }

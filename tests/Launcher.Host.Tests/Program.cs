@@ -15,6 +15,10 @@ unsafe
     delegate* unmanaged[Cdecl]<int> snapshots = &Entry.BrowseSnapshots;
     delegate* unmanaged[Cdecl]<int> webDav = &Entry.BrowseWebDav;
     delegate* unmanaged[Cdecl]<int> steamCloud = &Entry.BrowseSteamCloud;
+    delegate* unmanaged[Cdecl]<int> mods = &Entry.BrowseMods;
+    delegate* unmanaged[Cdecl]<nint, int> importMod = &Entry.BeginModImport;
+    delegate* unmanaged[Cdecl]<int> workshop = &Entry.BrowseWorkshop;
+    delegate* unmanaged[Cdecl]<int> nexus = &Entry.BrowseNexus;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
@@ -29,6 +33,9 @@ unsafe
     Check(snapshots() == -1, "Save snapshots need an initialized host");
     Check(webDav() == -1, "WebDAV needs an initialized host");
     Check(steamCloud() == -1, "Steam Cloud needs an initialized host");
+    Check(mods() == -1 && importMod(0) == -2, "Mod management validates its native entry arguments");
+    Check(workshop() == -1, "Workshop needs an initialized host");
+    Check(nexus() == -1, "Nexus Mods needs an initialized host");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
 
@@ -68,6 +75,10 @@ Check(SteamCloudSaves.LocalPath("%GameInstall%/settings.save", false) is null &&
     SteamCloudSaves.LocalPath("%GameInstall%/settings.save", true) == "settings.save", "Steam Cloud settings sync is optional");
 Check(SteamCloudSaves.LocalPath("%GameInstall%/profile1/saves/history/../bad.run", true) is null,
     "Steam Cloud paths cannot escape the save directory");
+Check(WorkshopFiles.ParseId("18446744073709551615") == ulong.MaxValue, "Workshop IDs retain unsigned 64-bit values");
+Check(WorkshopFiles.ParseId("https://steamcommunity.com/sharedfiles/filedetails/?id=456&searchtext=test") == 456,
+    "Workshop item links resolve to their item ID");
+Check(WorkshopFiles.ParseId("https://other.example/sharedfiles/filedetails/?id=456") is null, "Only Steam Community item links are accepted");
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 

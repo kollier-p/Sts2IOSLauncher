@@ -18,9 +18,9 @@ static BOOL (*godotLaunch)(id,SEL,UIApplication*,NSDictionary*);
 static NSMutableDictionary<NSString*,NSValue*> *lifecycle;
 static BOOL started = NO;
 static InitHost initHost;
-static Command beginDownload, beginImport;
+static Command beginDownload, beginImport, beginModImport;
 static Reply reply;
-static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -61,12 +61,13 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
 @property(nonatomic,strong) NSURL *scopedArchive;
+@property(nonatomic,assign) BOOL pickingMod;
 @property(nonatomic,assign) int64_t shownPromptId;
 @property(nonatomic,assign) BOOL initialized, initializing;
 @property(nonatomic,assign) BOOL waitingForSteam;
@@ -143,6 +144,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.snapshots=[self button:@"Save snapshots" action:@selector(snapshotsPressed)];
     self.webDav=[self button:@"WebDAV save sync" action:@selector(webDavPressed)];
     self.steamCloud=[self button:@"Steam Cloud saves" action:@selector(steamCloudPressed)];
+    self.mods=[self button:@"Installed mods" action:@selector(modsPressed)];
+    self.importMod=[self button:@"Import mod ZIP" action:@selector(importModPressed)];
+    self.workshop=[self button:@"Install a Workshop item" action:@selector(workshopPressed)];
+    UIButton *workshopWebsite=[self button:@"Browse Steam Workshop" action:@selector(workshopWebsitePressed)];
+    self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
@@ -152,14 +158,15 @@ static void forward(id service,SEL selector,UIApplication *application) {
     downloadStyle.title=@"Sign in & install game";
     self.download.configuration=downloadStyle;
 
-    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves"]];
+    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods"]];
     navigation.selectedSegmentIndex=0;
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
-    self.sections=@[playSection,installSection,savesSection];
-    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,self.progress,self.message,self.cancel]];
+    UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
+    self.sections=@[playSection,installSection,savesSection,modsSection];
+    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
     stack.translatesAutoresizingMaskIntoConstraints=NO;
     [self sectionChanged:navigation];
@@ -169,6 +176,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     preferredWidth.priority=UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
+    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -196,6 +204,8 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
                get("BrowseWebDav",(void**)&browseWebDav)==0 &&
                get("BrowseSteamCloud",(void**)&browseSteamCloud)==0 &&
+               get("BrowseMods",(void**)&browseMods)==0 && get("BeginModImport",(void**)&beginModImport)==0 &&
+               get("BrowseWorkshop",(void**)&browseWorkshop)==0 && get("BrowseNexus",(void**)&browseNexus)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -228,6 +238,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.play.enabled=idle && installed!=nil && profile!=nil;
     self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
+    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -283,7 +294,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [self presentViewController:sheet animated:YES completion:nil];
         return;
     }
-    NSString *title=[kind isEqual:@"profile-name"]?@"New launch profile":([kind hasPrefix:@"webdav-"]?@"WebDAV":@"Steam");
+    NSString *title=@"Steam";
+    if([kind isEqual:@"profile-name"]) title=@"New launch profile";
+    if([kind hasPrefix:@"webdav-"]) title=@"WebDAV";
+    if([kind hasPrefix:@"nexus-"]) title=@"Nexus Mods";
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     self.prompt=alert;
     if([kind isEqual:@"confirm"]){
@@ -291,10 +305,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Enter code" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(@"code");}]];
     }else{
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field){
-            field.secureTextEntry=[kind isEqual:@"password"] || [kind isEqual:@"webdav-password"] || [kind isEqual:@"steam-password"];
+            field.secureTextEntry=[@[@"password",@"webdav-password",@"steam-password",@"nexus-key",@"nexus-link"] containsObject:kind];
             field.autocapitalizationType=UITextAutocapitalizationTypeNone;
             field.autocorrectionType=UITextAutocorrectionTypeNo;
-            if([kind isEqual:@"webdav-url"]) field.keyboardType=UIKeyboardTypeURL;
+            if([@[@"webdav-url",@"workshop-id",@"nexus-link"] containsObject:kind]) field.keyboardType=UIKeyboardTypeURL;
             if([kind isEqual:@"webdav-slot"]) field.placeholder=@"global";
         }];
         __weak UIAlertController *weakAlert=alert;
@@ -313,8 +327,23 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)snapshotsPressed { [self.view endEditing:YES];if(browseSnapshots()!=0)[self showError:@"Another operation is active."]; }
 - (void)webDavPressed { [self.view endEditing:YES];if(browseWebDav()!=0)[self showError:@"Another operation is active."]; }
 - (void)steamCloudPressed { [self.view endEditing:YES];if(browseSteamCloud()!=0)[self showError:@"Another operation is active."]; }
+- (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
+- (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
+- (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
+- (void)workshopWebsitePressed {
+    NSURL *url=[NSURL URLWithString:@"https://steamcommunity.com/app/2868840/workshop/"];
+    [self.application openURL:url options:@{} completionHandler:nil];
+}
+- (void)importModPressed {
+    [self.view endEditing:YES];
+    self.pickingMod=YES;
+    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:NO];
+    picker.delegate=self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
 - (void)importPressed {
     [self.view endEditing:YES];
+    self.pickingMod=NO;
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
     for(NSString *extension in @[@"tar",@"gz",@"tgz"]){
         UTType *type=[UTType typeWithFilenameExtension:extension];
@@ -327,9 +356,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *archive=urls.firstObject;
     if([archive startAccessingSecurityScopedResource])self.scopedArchive=archive;
-    if(beginImport(archive.fileSystemRepresentation)!=0){
+    Command importer=self.pickingMod?beginModImport:beginImport;
+    if(importer(archive.fileSystemRepresentation)!=0){
         [self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;
-        [self showError:@"Unable to open the selected game archive."];
+        [self showError:self.pickingMod?@"Unable to open the selected mod archive.":@"Unable to open the selected game archive."];
     }
 }
 - (void)downloadPressed { [self startDownload:NO]; }

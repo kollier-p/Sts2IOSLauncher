@@ -56,7 +56,8 @@ def validate(app, extensions, fixtures):
     verify_symbols(binary, "_sts2_extensions_available", "_OBJC_CLASS_$_LauncherGate")
     verify_framework(app, "sts2", "_sts2_host_delegate", "_godotsharp_game_main_init",
                      "_sts2_initialize_game_runtime", "_sts2_jit_patch", "_sts2_vault_read",
-                     "_sts2_vault_write", "_sts2_vault_clear", "_sts2_webdav_read", "_sts2_webdav_write", "_sts2_webdav_clear")
+                     "_sts2_vault_write", "_sts2_vault_clear", "_sts2_webdav_read", "_sts2_webdav_write", "_sts2_webdav_clear",
+                     "_sts2_nexus_read", "_sts2_nexus_write", "_sts2_nexus_clear")
     for name in ("libSystem.Native.dylib", "libSystem.Globalization.Native.dylib",
                  "libSystem.IO.Compression.Native.dylib", "libSystem.Net.Security.Native.dylib",
                  "libSystem.Security.Cryptography.Native.Apple.dylib"):
