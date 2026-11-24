@@ -77,7 +77,7 @@ public sealed class SteamSession : IAsyncDisposable
         var servers = (await Content.GetServersForSteamPipe()).Where(s => !s.UseAsProxy && !s.SteamChinaOnly && s.Host != null && (s.AllowedAppIds.Length == 0 || s.AllowedAppIds.Contains(Payload.AppId))).OrderBy(s => s.WeightedLoad).Take(8).ToArray();
         if (servers.Length == 0) throw new IOException("No suitable Steam CDN servers.");
         using var cdn = new SteamKit2.CDN.Client(client);
-        var authTokens = new Dictionary<string, SteamContent.CDNAuthToken>();
+        var authTokens = new System.Collections.Concurrent.ConcurrentDictionary<string, SteamContent.CDNAuthToken>();
         async Task<T> FromCdn<T>(Func<SteamKit2.CDN.Server, string?, Task<T>> action)
         {
             Exception? last = null;
@@ -111,21 +111,27 @@ public sealed class SteamSession : IAsyncDisposable
         using var installLock = new FileStream(Path.Combine(store.Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
         Directory.CreateDirectory(staging);
+        var progressLock = new object();
+        void ReportBytes(long bytes)
+        {
+            lock (progressLock) { done += bytes; progress?.Report(new("download", done, total)); }
+        }
         bool processing = false;
         try
         {
-            foreach (var (file, relative) in selected)
+            await Parallel.ForEachAsync(selected, new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = ct }, async (entry, workerToken) =>
             {
-                ct.ThrowIfCancellationRequested();
+                var (file, relative) = entry;
+                using var workerCdn = new SteamKit2.CDN.Client(client);
+                workerToken.ThrowIfCancellationRequested();
                 var output = Payload.SafePath(staging, relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!);
                 // Reuse only complete files whose length and Steam manifest hash match.
                 if (File.Exists(output))
                 {
                     if (DownloadCache.IsVerified(output, checked((long)file.TotalSize), file.FileHash))
                     {
-                        done += checked((long)file.TotalSize);
-                        progress?.Report(new("download", done, total));
-                        continue;
+                        ReportBytes(checked((long)file.TotalSize));
+                        return;
                     }
                 }
                 using (var stream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
@@ -133,24 +139,22 @@ public sealed class SteamSession : IAsyncDisposable
                     ulong cursor = 0;
                     foreach (var chunk in file.Chunks.OrderBy(c => c.Offset))
                     {
-                        ct.ThrowIfCancellationRequested();
+                        workerToken.ThrowIfCancellationRequested();
                         if (chunk.Offset != cursor || chunk.UncompressedLength == 0 || chunk.UncompressedLength > 64 * 1024 * 1024 || cursor > file.TotalSize || chunk.UncompressedLength > file.TotalSize - cursor) throw new InvalidDataException("Invalid chunk bounds or gap.");
                         int length = checked((int)chunk.UncompressedLength);
                         if (ChunkCache.Verify(stream, checked((long)cursor), length, chunk.ChunkID))
                         {
-                            cursor += (uint)length; done += length;
-                            progress?.Report(new("download", done, total));
+                            cursor += (uint)length; ReportBytes(length);
                             continue;
                         }
                         stream.SetLength(checked((long)cursor));
                         stream.Position = checked((long)cursor);
                         var data = new byte[length];
-                        var size = await FromCdn((s, t) => cdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t));
+                        var size = await FromCdn((s, t) => workerCdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t));
                         if (size != data.Length) throw new InvalidDataException("Unexpected chunk size.");
                         if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), chunk.ChunkID))
                             throw new InvalidDataException("Downloaded chunk hash mismatch.");
-                        await stream.WriteAsync(data, ct); cursor += (uint)size; done += size;
-                        progress?.Report(new("download", done, total));
+                        await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size);
                     }
                     if (cursor != file.TotalSize) throw new InvalidDataException("File length mismatch.");
                     stream.SetLength(checked((long)file.TotalSize));
@@ -158,7 +162,7 @@ public sealed class SteamSession : IAsyncDisposable
                 }
                 using var read = File.OpenRead(output);
                 if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(read), file.FileHash)) throw new InvalidDataException("Downloaded file hash mismatch.");
-            }
+            });
             processing = true;
             progress?.Report(new("process", done, total));
             var receipt = store.Install(staging, manifestId, branch, ct);
