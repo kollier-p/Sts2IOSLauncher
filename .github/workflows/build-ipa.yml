@@ -45,12 +45,21 @@ jobs:
           version=0.1.0
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          # Use the classic linker to test compatibility with the SDK's native libraries.
           dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -v:minimal -bl:ios-build.binlog \
             -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false \
-            -p:MtouchExtraArgs="--gcc_flags=-Wl%2C-ld_classic" \
             -p:BuildIpa=false -p:ApplicationId="io.github.$owner.sts2ioslauncher" \
             -p:ApplicationDisplayVersion="$version" -p:ApplicationVersion="$GITHUB_RUN_NUMBER"
+      - name: Identify unexpected native framework dependency
+        if: failure()
+        run: |
+          echo "Generated native linker inputs:"
+          find src/Launcher.iOS/obj -type f \( -name '*.rsp' -o -name '*.txt' -o -name '*.json' -o -name '*.xml' -o -name '*.flags' \) -print0 | xargs -0 grep -il DiskArbitration || true
+          echo "SDK references:"
+          find "$DOTNET_ROOT/packs" -type f \( -name '*.targets' -o -name '*.props' -o -name '*.xml' \) -print0 | xargs -0 grep -in DiskArbitration | cut -c1-500 | head -60 || true
+          echo "Testing a minimal UIKit app without SteamKit2:"
+          dotnet new ios -o "$RUNNER_TEMP/ios-probe" --no-restore
+          dotnet build "$RUNNER_TEMP/ios-probe" -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -p:ValidateSceneManifest=false -v:minimal > "$RUNNER_TEMP/ios-probe.log" 2>&1 || true
+          tail -60 "$RUNNER_TEMP/ios-probe.log"
       - name: Upload native build diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
