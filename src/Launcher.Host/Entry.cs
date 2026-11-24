@@ -121,7 +121,7 @@ public static class Entry
                 releaseInfo=Path.Combine(Path.GetDirectoryName(plan.Pack)!,"release_info.json");
                 var link=Path.Combine(documents,"StS2.pck");
                 var temporary=link+"."+Guid.NewGuid().ToString("N")+".tmp";
-                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); File.Move(temporary,link,true); }
+                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); PckScripts.Add(temporary,plan.GameAssembly,cts.Token); File.Move(temporary,link,true); }
                 finally {if(File.Exists(temporary))File.Delete(temporary);}
                 Publish(new("ready","Game verified. Starting Godot."));
             } catch(OperationCanceledException){Publish(new("idle","Launch cancelled"));}

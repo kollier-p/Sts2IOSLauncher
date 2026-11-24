@@ -1,0 +1,20 @@
+name: Native extension compile
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/stage_extensions.py'
+      - '.github/workflows/native-extensions.yml'
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/stage_extensions.py .native-build/extensions
+      - name: Inspect compiled extension inputs
+        run: find .native-build/extensions -type f | head -100
