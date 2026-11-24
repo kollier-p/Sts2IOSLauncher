@@ -5,6 +5,7 @@ on:
     paths:
       - 'native/**'
       - 'scripts/build_native_mono.py'
+      - 'scripts/stage_ios_runtime.py'
       - '.github/workflows/native-mono-patched.yml'
 permissions:
   contents: read
@@ -24,8 +25,10 @@ jobs:
       - name: Link independent game runtime framework binary
         run: |
           mkdir -p .native-build/framework
-          xcrun --sdk iphoneos clang++ -dynamiclib -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc native/GameRuntime.mm native/JitProbe.mm .native-build/mono-patched/MonoJitMemory.o $(for f in .native-build/mono-patched/mono/mini/libmonosgen-2.0.a .native-build/mono-patched/mono/mini/libmono-component-*-static.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework Security -lz -liconv -Wl,-install_name,@rpath/sts2.framework/sts2 -o .native-build/framework/sts2
+          xcrun --sdk iphoneos clang++ -dynamiclib -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc native/GameRuntime.mm native/JitProbe.mm native/LaunchRequest.mm .native-build/mono-patched/MonoJitMemory.o $(for f in .native-build/mono-patched/mono/mini/libmonosgen-2.0.a .native-build/mono-patched/mono/mini/libmono-component-*-static.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework Security -lz -liconv -Wl,-install_name,@rpath/sts2.framework/sts2 -o .native-build/framework/sts2
           xcrun lipo -verify_arch arm64 .native-build/framework/sts2
+      - name: Stage pinned iOS managed runtime
+        run: python3 scripts/stage_ios_runtime.py .native-build/runtime-distribution
       - uses: actions/upload-artifact@v4
         with:
           name: patched-mono-arm64
@@ -33,4 +36,5 @@ jobs:
             .native-build/mono-patched/mono/mini/*.a
             .native-build/mono-patched/MonoJitMemory.o
             .native-build/framework/sts2
+            .native-build/runtime-distribution/
           if-no-files-found: error
