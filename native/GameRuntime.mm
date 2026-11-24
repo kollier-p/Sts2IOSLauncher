@@ -42,7 +42,10 @@ extern "C" __attribute__((visibility("default"))) bool godotsharp_game_main_init
     if (!runtime) return false;
     bool (*entry)(void *, void *, void *, int) = nullptr;
     int result = coreclr_create_delegate(runtime, domain, "sts2", "GodotPlugins.Game.Main", "InitializeFromGameProject", (void **)&entry);
-    return result == 0 && entry && entry(godot ?: dlopen(nullptr, RTLD_NOW), callbacks, interop, size);
+    if(result != 0 || !entry || !entry(godot ?: dlopen(nullptr, RTLD_NOW), callbacks, interop, size))return false;
+    int (*hooks)()=nullptr;
+    result=coreclr_create_delegate(runtime,domain,"Launcher.Host","Launcher.Host.Entry","StartGameHooks",(void**)&hooks);
+    return result==0 && hooks && hooks()==0;
 }
 
 extern "C" __attribute__((visibility("default"))) int sts2_host_delegate(const char *method,void **entry) {

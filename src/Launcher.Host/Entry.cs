@@ -19,6 +19,8 @@ public static class Entry
     static TaskCompletionSource<string>? prompt;
     static string? assemblyRoot;
     static string? adapterRoot;
+    static Assembly? loadedGame;
+    static string? releaseInfo;
     static State state = new("idle", "Sign in to Steam");
     sealed record State(string Stage, string Message, long Completed=0,long Total=0,double Speed=0,string? Eta=null,string? Prompt=null,string[]? Branches=null);
     sealed record Request(string Username,string Password,string Branch,string? Manifest,string? BetaPassword);
@@ -115,10 +117,11 @@ public static class Entry
                 if(File.Exists(harmony)) Launcher.Adapters.Rewriter.Prepare("harmony",harmony,Path.Combine(managed,"STS2JitSupport.dll"),Path.Combine(adapter,"0Harmony.dll"));
                 assemblyRoot=plan.Assemblies;adapterRoot=adapter;
                 // Load by name before Godot asks the runtime for its delegate.
-                AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
+                loadedGame=AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
+                releaseInfo=Path.Combine(Path.GetDirectoryName(plan.Pack)!,"release_info.json");
                 var link=Path.Combine(documents,"StS2.pck");
                 var temporary=link+"."+Guid.NewGuid().ToString("N")+".tmp";
-                try { if(NativeLink(plan.Pack,temporary)!=0) File.Copy(plan.Pack,temporary); File.Move(temporary,link,true); }
+                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); File.Move(temporary,link,true); }
                 finally {if(File.Exists(temporary))File.Delete(temporary);}
                 Publish(new("ready","Game verified. Starting Godot."));
             } catch(OperationCanceledException){Publish(new("idle","Launch cancelled"));}
@@ -127,8 +130,12 @@ public static class Entry
         });
         return 0;
     }
-    [DllImport("libSystem.B.dylib",EntryPoint="link",SetLastError=true)]
-    static extern int NativeLink([MarshalAs(UnmanagedType.LPUTF8Str)] string source,[MarshalAs(UnmanagedType.LPUTF8Str)] string target);
+    [DllImport("libSystem.B.dylib",EntryPoint="clonefile",SetLastError=true)]
+    static extern int NativeClone([MarshalAs(UnmanagedType.LPUTF8Str)] string source,[MarshalAs(UnmanagedType.LPUTF8Str)] string target,int flags);
+    public static int StartGameHooks() {
+        try { GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),documents,releaseInfo ?? throw new InvalidOperationException()); return 0; }
+        catch(Exception e) { Console.Error.WriteLine("[iOS] Game compatibility startup: "+e); return -1; }
+    }
     sealed class DirectProgress<T>(Action<T> report):IProgress<T>{public void Report(T value)=>report(value);}
     sealed class Guard(CancellationToken ct):IAuthenticator
     {
