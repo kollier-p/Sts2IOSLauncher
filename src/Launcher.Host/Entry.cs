@@ -24,7 +24,7 @@ public static class Entry
     static State state = new("idle", "Sign in to Steam");
     sealed record State(string Stage, string Message, long Completed=0,long Total=0,double Speed=0,string? Eta=null,string? Prompt=null,string[]? Branches=null);
     sealed record Request(string Username,string Password,string Branch,string? Manifest,string? BetaPassword);
-    static void Publish(State next) { lock(Sync) state=next; }
+    static void Publish(State next) { lock(Sync) state=next; HostDiagnostics.Stage(next.Stage); }
     static string Str(nint p) => Marshal.PtrToStringUTF8(p) ?? "";
     public static int Initialize(nint payloadRoot,nint docs,nint bundled)
     {
@@ -32,6 +32,7 @@ public static class Entry
             store = new PayloadStore(Str(payloadRoot));
             documents = Str(docs); managed=Str(bundled);
             Directory.CreateDirectory(documents);
+            HostDiagnostics.Initialize(Path.Combine(documents,"LauncherLogs"));
             AssemblyLoadContext.Default.Resolving += Resolve;
             Publish(new("idle",store.Current() is {} r ? $"Installed: {r.Branch} / {r.ManifestId}" : "No game installed"));
             return 0;
@@ -90,7 +91,7 @@ public static class Entry
             var receipt=await session.DownloadAndInstallAsync(store!,branch,exact,reporter,cts.Token,beta);
             Publish(new("installed",$"Installed {receipt.Branch} / {receipt.ManifestId}. Ready for launch preparation."));
         } catch(OperationCanceledException) { Publish(new("idle","Cancelled; existing installation retained.")); }
-          catch(Exception e) { Publish(new("error",$"Download failed ({e.GetType().Name}).")); }
+          catch(Exception e) { HostDiagnostics.Error("download",e); Publish(new("error",$"Download failed ({e.GetType().Name}).")); }
         finally { lock(Sync){active=null;prompt=null;} cts.Dispose(); }
     }
     static async Task<string> Ask(string kind,string message,CancellationToken ct,string[]? branches=null)
@@ -125,7 +126,7 @@ public static class Entry
                 finally {if(File.Exists(temporary))File.Delete(temporary);}
                 Publish(new("ready","Game verified. Starting Godot."));
             } catch(OperationCanceledException){Publish(new("idle","Launch cancelled"));}
-              catch(Exception e){Publish(new("error",$"Launch preparation failed ({e.GetType().Name})."));}
+              catch(Exception e){HostDiagnostics.Error("prepare",e);Publish(new("error",$"Launch preparation failed ({e.GetType().Name})."));}
             finally{lock(Sync){active=null;}cts.Dispose();}
         });
         return 0;

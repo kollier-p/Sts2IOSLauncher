@@ -43,6 +43,8 @@ def main():
     metadata=plistlib.loads(info.read_bytes())
     metadata.update({"godot_cmdline":["--main-pack","user://StS2.pck"],"CFBundleDisplayName":"STS2 Launcher","UIFileSharingEnabled":True,"LSSupportsOpeningDocumentsInPlace":True,"NSLocalNetworkUsageDescription":"Find local multiplayer games."})
     info.write_bytes(plistlib.dumps(metadata))
+    if "--extensions" in sys.argv:
+        run(sys.executable,ROOT/"scripts/integrate_extensions.py",xproj,WORK/"extensions")
     run("xcodebuild","-project",xproj,"-scheme","Sts2Host","-configuration","Release","-destination","generic/platform=iOS","-derivedDataPath",WORK/"godot-derived","CODE_SIGNING_ALLOWED=NO","CODE_SIGNING_REQUIRED=NO","DEVELOPMENT_TEAM=","build")
     app=WORK/"godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
     if not app.is_dir():raise SystemExit("Godot application missing")
