@@ -55,6 +55,16 @@ try
     Assert(estimate.BytesPerSecond == 100 && estimate.Remaining == TimeSpan.FromSeconds(4), "Transfer estimate excludes cached bytes");
     Assert(TransferEstimate.Calculate(100, 100, 700, TimeSpan.FromSeconds(2)).Remaining is null, "No speed no ETA");
     Assert(TransferEstimate.Calculate(100, 700, 700, TimeSpan.FromSeconds(2)).Remaining == TimeSpan.Zero, "Finished ETA");
-    Console.WriteLine("All payload and download fixture assertions passed.");
+    var second = store.NewStaging(); Fixture(second);
+    var newer = store.Install(second, 789, "public");
+    Assert(store.InstalledVersions().Count == 2, "List installed versions");
+    Assert(store.Current() == newer, "New version active");
+    Assert(store.ActivateVersion(receipt.PayloadId) == receipt && store.Current() == receipt, "Rollback to previous version");
+    Reject(() => store.ActivateVersion("../missing"));
+    Assert(store.Current() == receipt, "Invalid rollback preserves active version");
+    File.AppendAllText(Path.Combine(root, "payload-" + newer.PayloadId, Payload.Required[0]), "corruption");
+    Reject(() => store.ActivateVersion(newer.PayloadId));
+    Assert(store.Current() == receipt, "Corrupt rollback preserves active version");
+    Console.WriteLine("All payload, download and rollback fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

@@ -72,6 +72,47 @@ public sealed class PayloadStore(string root)
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return receipt;
     }
+    public IReadOnlyList<InstallReceipt> InstalledVersions()
+    {
+        if (!Directory.Exists(Root)) return [];
+        var versions = new List<InstallReceipt>();
+        foreach (var directory in Directory.EnumerateDirectories(Root, "payload-*"))
+        {
+            try
+            {
+                var name = Path.GetFileName(directory);
+                var safe = Payload.SafePath(Root, name);
+                var receipt = JsonSerializer.Deserialize<InstallReceipt>(File.ReadAllText(Payload.SafePath(safe, ".payload_manifest.json")));
+                if (receipt is null || receipt.AppId != Payload.AppId || receipt.DepotId != Payload.WindowsDepot ||
+                    receipt.ManifestId == 0 || name != "payload-" + receipt.PayloadId ||
+                    !receipt.PayloadId.StartsWith(receipt.ManifestId + "-", StringComparison.Ordinal) ||
+                    !Guid.TryParseExact(receipt.PayloadId[(receipt.ManifestId.ToString().Length + 1)..], "N", out _)) continue;
+                Payload.Validate(safe);
+                versions.Add(receipt);
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException) { }
+        }
+        return versions.OrderBy(x => x.ManifestId).ThenBy(x => x.PayloadId, StringComparer.Ordinal).ToArray();
+    }
+    public InstallReceipt ActivateVersion(string payloadId)
+    {
+        Directory.CreateDirectory(Root);
+        using var installLock = new FileStream(Path.Combine(Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var receipt = InstalledVersions().SingleOrDefault(x => x.PayloadId == payloadId)
+            ?? throw new InvalidDataException("Installed version not found.");
+        var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
+        using (var stream = File.OpenRead(Payload.SafePath(directory, Payload.Required[0])))
+            if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Installed PCK checksum mismatch.");
+        var temp = Path.Combine(Root, "current-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew)) { JsonSerializer.Serialize(stream, receipt); stream.Flush(true); }
+            File.Move(temp, Path.Combine(Root, "current.json"), true);
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
+        return receipt;
+    }
     public InstallReceipt? Current()
     {
         var pointer = Path.Combine(Root, "current.json");
