@@ -73,7 +73,7 @@ public sealed class SteamSession : IAsyncDisposable
         }
         return result.OrderBy(x => x.Name == "public" ? 0 : 1).ThenBy(x => x.Name, StringComparer.Ordinal).ToArray();
     }
-    public async Task<ulong> ResolveManifestAsync(string branch, CancellationToken ct)
+    public async Task<ulong> ResolveManifestAsync(string branch, CancellationToken ct, string? betaPassword = null)
     {
         RequireSession(); ct.ThrowIfCancellationRequested();
         var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null);
@@ -83,14 +83,28 @@ public sealed class SteamSession : IAsyncDisposable
         var product = info.Results?.FirstOrDefault(x => x.Apps.ContainsKey(Payload.AppId));
         if (product is null) throw new IOException("Steam did not return game product information.");
         var value = product.Apps[Payload.AppId].KeyValues["depots"][Payload.WindowsDepot.ToString(CultureInfo.InvariantCulture)]["manifests"][branch]["gid"].Value;
-        if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id == 0) throw new IOException("No accessible manifest for requested branch; no fallback attempted.");
+        if (ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id != 0) return id;
+        if (string.IsNullOrEmpty(betaPassword) || string.Equals(branch, "public", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("No accessible manifest for requested branch; no fallback attempted.");
+        var unlock = await Apps.CheckAppBetaPassword(Payload.AppId, betaPassword);
+        ct.ThrowIfCancellationRequested();
+        if (unlock.Result != EResult.OK || !unlock.BetaPasswords.TryGetValue(branch, out var hash))
+            throw new UnauthorizedAccessException("Steam rejected the beta branch password.");
+        var privateInfo = await Apps.PICSGetPrivateBeta(Payload.AppId, token, branch, hash);
+        ct.ThrowIfCancellationRequested();
+        if (privateInfo.Result != EResult.OK) throw new UnauthorizedAccessException("Steam rejected private branch access.");
+        value = privateInfo.DepotSection[Payload.WindowsDepot.ToString(CultureInfo.InvariantCulture)]["manifests"][branch]["gid"].Value;
+        if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out id) || id == 0)
+            throw new IOException("No accessible manifest for unlocked branch; no fallback attempted.");
         return id;
     }
-    public async Task<InstallReceipt> DownloadAndInstallAsync(PayloadStore store, string branch, ulong? exactManifest, IProgress<DownloadProgress>? progress, CancellationToken ct)
+    public async Task<InstallReceipt> DownloadAndInstallAsync(PayloadStore store, string branch, ulong? exactManifest, IProgress<DownloadProgress>? progress, CancellationToken ct, string? betaPassword = null)
     {
         RequireSession(); if (string.IsNullOrWhiteSpace(branch) || exactManifest == 0) throw new ArgumentException("Invalid manifest selection.");
         progress?.Report(new("resolve", 0, 0));
-        var manifestId = exactManifest ?? await ResolveManifestAsync(branch, ct);
+        var manifestId = exactManifest ?? await ResolveManifestAsync(branch, ct, betaPassword);
+        if (exactManifest.HasValue && !string.IsNullOrEmpty(betaPassword) && !string.Equals(branch, "public", StringComparison.OrdinalIgnoreCase))
+            await ResolveManifestAsync(branch, ct, betaPassword);
         var ticket = await Apps.GetAppOwnershipTicket(Payload.AppId);
         if (ticket.Result != EResult.OK || ticket.Ticket.Length == 0) throw new UnauthorizedAccessException("Steam did not authorize access to the game.");
         var key = await Apps.GetDepotDecryptionKey(Payload.WindowsDepot, Payload.AppId);

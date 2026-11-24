@@ -61,7 +61,7 @@ sealed class SetupController(SceneDelegate app) : UIViewController
 {
     readonly PayloadStore store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "STS2Payloads"));
     readonly UILabel status = new() { Lines = 0, TextColor = UIColor.White };
-    readonly UITextField username = Field("Steam account name"), password = Field("Steam password", true), branch = Field("Branch (public)"), manifest = Field("Exact Manifest ID (optional)");
+    readonly UITextField username = Field("Steam account name"), password = Field("Steam password", true), branch = Field("Branch (public)"), manifest = Field("Exact Manifest ID (optional)"), betaPassword = Field("Beta branch password (optional)", true);
     readonly UIButton start = UIButton.FromType(UIButtonType.System), cancel = UIButton.FromType(UIButtonType.System), saved = UIButton.FromType(UIButtonType.System), logout = UIButton.FromType(UIButtonType.System);
     readonly UISwitch remember = new();
     readonly UIProgressView progress = new(UIProgressViewStyle.Default);
@@ -76,7 +76,7 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         start.SetTitle("Sign in & download", UIControlState.Normal); saved.SetTitle("Use saved Steam session", UIControlState.Normal); cancel.SetTitle("Cancel", UIControlState.Normal); logout.SetTitle("Forget Steam session", UIControlState.Normal);
         var rememberLabel = new UILabel { Text = "Remember Steam session", TextColor = UIColor.White };
         var toggle = new UIStackView(new UIView[] { rememberLabel, remember }) { Axis = UILayoutConstraintAxis.Horizontal, Distribution = UIStackViewDistribution.EqualSpacing };
-        var stack = new UIStackView(new UIView[] { heading, sub, username, password, branch, manifest, toggle, start, saved, logout, progress, status, cancel }) { Axis = UILayoutConstraintAxis.Vertical, Spacing = 16, TranslatesAutoresizingMaskIntoConstraints = false };
+        var stack = new UIStackView(new UIView[] { heading, sub, username, password, branch, betaPassword, manifest, toggle, start, saved, logout, progress, status, cancel }) { Axis = UILayoutConstraintAxis.Vertical, Spacing = 16, TranslatesAutoresizingMaskIntoConstraints = false };
         View.AddSubview(stack); var guide = View.SafeAreaLayoutGuide;
         NSLayoutConstraint.ActivateConstraints(new[] { stack.TopAnchor.ConstraintEqualTo(guide.TopAnchor, 24), stack.LeadingAnchor.ConstraintEqualTo(guide.LeadingAnchor, 24), stack.TrailingAnchor.ConstraintEqualTo(guide.TrailingAnchor, -24), stack.BottomAnchor.ConstraintLessThanOrEqualTo(guide.BottomAnchor, -20) });
         start.TouchUpInside += async (_, _) => await Run(false);
@@ -93,9 +93,9 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         var selectedBranch = branch.Text?.Trim() ?? "public"; if (selectedBranch.Length == 0) selectedBranch = "public";
         ulong? selectedManifest = null;
         if (!string.IsNullOrWhiteSpace(manifest.Text)) { if (!ulong.TryParse(manifest.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value == 0) { status.Text = "Enter a valid Manifest ID."; return; } selectedManifest = value; }
-        var account = username.Text?.Trim() ?? ""; var secret = password.Text ?? "";
+        var account = username.Text?.Trim() ?? ""; var secret = password.Text ?? ""; var betaSecret = betaPassword.Text ?? "";
         if (!reuse && (account.Length == 0 || secret.Length == 0)) { status.Text = "Enter your Steam account name and password."; return; }
-        password.Text = ""; View!.EndEditing(true);
+        password.Text = ""; betaPassword.Text = ""; View!.EndEditing(true);
         using var cts = new CancellationTokenSource(); active = cts; SetBusy(true);
         bool success = false;
         try
@@ -106,8 +106,13 @@ sealed class SetupController(SceneDelegate app) : UIViewController
             if (reuse) { identity = IdentityVault.Load() ?? throw new InvalidOperationException("No saved Steam session. Sign in again."); await session.LogOnAsync(identity, true, cts.Token); }
             else { identity = await session.AuthenticateAsync(account, secret, new GuardUI(this, cts.Token), null, remember.On, cts.Token); if (remember.On) IdentityVault.Save(identity); }
             secret = "";
+            if (!selectedManifest.HasValue)
+            {
+                var branches = await session.ListBranchesAsync(cts.Token);
+                selectedBranch = await PickBranch(branches, selectedBranch, cts.Token);
+            }
             var reporter = new Progress<DownloadProgress>(p => { progress.Progress = p.Total > 0 ? Math.Clamp((float)((double)p.Completed / p.Total), 0, 1) : 0; status.Text = $"{p.Stage}: {p.Completed / 1048576d:N1} / {p.Total / 1048576d:N1} MiB" + (p.Stage == "download" ? $"\n{p.BytesPerSecond / 1048576d:N2} MiB/s · ETA {p.Remaining?.ToString(@"hh\:mm\:ss") ?? "—"}" : ""); });
-            await Task.Run(() => session.DownloadAndInstallAsync(store, selectedBranch, selectedManifest, reporter, cts.Token), cts.Token); success = true;
+            await Task.Run(() => session.DownloadAndInstallAsync(store, selectedBranch, selectedManifest, reporter, cts.Token, betaSecret), cts.Token); success = true;
         }
         catch (OperationCanceledException) { status.Text = "Cancelled. Existing installation is unchanged."; }
         catch (UnauthorizedAccessException) { status.Text = "Steam authorization failed. Check account ownership and manifest access."; }
@@ -115,7 +120,22 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         finally { active = null; SetBusy(false); }
         if (success) app.ResetLauncher(); // In-process reset only; real jailbreak relaunch is a separate device-dependent adapter.
     }
-    void SetBusy(bool busy) { start.Enabled = saved.Enabled = logout.Enabled = username.Enabled = password.Enabled = branch.Enabled = manifest.Enabled = remember.Enabled = !busy; cancel.Enabled = busy; }
+    void SetBusy(bool busy) { start.Enabled = saved.Enabled = logout.Enabled = username.Enabled = password.Enabled = branch.Enabled = manifest.Enabled = betaPassword.Enabled = remember.Enabled = !busy; cancel.Enabled = busy; }
+    Task<string> PickBranch(IReadOnlyList<SteamSession.GameBranch> branches, string selected, CancellationToken ct)
+    {
+        var result = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        InvokeOnMainThread(() => {
+            if (ct.IsCancellationRequested) { result.TrySetCanceled(ct); return; }
+            var alert = UIAlertController.Create("Game branch", "Select the Steam branch to install.", UIAlertControllerStyle.Alert);
+            foreach (var option in branches)
+                alert.AddAction(UIAlertAction.Create(option.Name + (option.PasswordRequired ? " (password required)" : ""), UIAlertActionStyle.Default, _ => result.TrySetResult(option.Name)));
+            if (!branches.Any(x => x.Name == selected))
+                alert.AddAction(UIAlertAction.Create("Use " + selected, UIAlertActionStyle.Default, _ => result.TrySetResult(selected)));
+            alert.AddAction(UIAlertAction.Create("Cancel", UIAlertActionStyle.Cancel, _ => result.TrySetCanceled()));
+            PresentViewController(alert, true, null);
+        });
+        return result.Task.WaitAsync(ct);
+    }
     internal Task<string> AskCode(string prompt, CancellationToken ct)
     {
         var result = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
