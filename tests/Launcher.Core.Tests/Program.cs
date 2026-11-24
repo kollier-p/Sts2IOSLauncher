@@ -119,6 +119,12 @@ try
     File.AppendAllText(Path.Combine(root, "payload-" + newer.PayloadId, Payload.Required[0]), "corruption");
     Reject(() => store.ActivateVersion(newer.PayloadId));
     Assert(store.Current() == receipt, "Corrupt rollback preserves active version");
+    File.Delete(Path.Combine(root, "payload-" + newer.PayloadId, Payload.Required[2]));
+    Assert(store.InstalledVersions().Contains(newer), "Damaged inactive version remains visible for cleanup");
+    Reject(() => store.ActivateVersion(newer.PayloadId));
+    store.RemoveVersion(newer.PayloadId);
+    Assert(!Directory.Exists(Path.Combine(root, "payload-" + newer.PayloadId)) && store.Current() == receipt,
+        "Damaged inactive version can be removed without affecting active installation");
     var archiveInput = Path.Combine(root, "archive-input"); Directory.CreateDirectory(archiveInput); Fixture(archiveInput);
     var zipPath = Path.Combine(root, "Windows backup.zip");
     using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))

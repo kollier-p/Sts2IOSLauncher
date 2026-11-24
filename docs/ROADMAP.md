@@ -14,3 +14,5 @@ Target device is a JIT-enabled 11-inch iPad Pro running iPadOS 17.6.3. Feature c
 The current build gate is ARM64 compilation, linking, and pre-IPA staging in CI. Steam sign-in, installation and gameplay on a physical iPad are separate verification gates.
 
 Download checks validate full chunk layouts before cache reuse, retry corrupt chunks on alternate CDN servers, and honor worker cancellation between requests. The installer checks available space, accounting for partial data already on disk. Launch preparation checks space if it needs to copy the PCK. Offline fixtures cover these paths, with live CDN behavior still to verify.
+
+Inactive installations with intact receipts remain selectable for removal even when required game files are missing; activation still validates required files and inventory before switching. This permits storage recovery without deleting the active installation. Regression coverage is pending CI on the implementing revision.

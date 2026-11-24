@@ -100,7 +100,7 @@ public sealed class PayloadStore(string root)
                 var safe = Payload.SafePath(Root, name);
                 var receipt = JsonSerializer.Deserialize<InstallReceipt>(File.ReadAllText(Payload.SafePath(safe, ".payload_manifest.json")));
                 if (receipt is null || !ValidIdentity(receipt) || name != "payload-" + receipt.PayloadId) continue;
-                Payload.Validate(safe);
+                // Keep damaged installations visible so users can reclaim their storage.
                 versions.Add(receipt);
             }
             catch (Exception e) when (e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException) { }
@@ -114,6 +114,7 @@ public sealed class PayloadStore(string root)
         var receipt = InstalledVersions().SingleOrDefault(x => x.PayloadId == payloadId)
             ?? throw new InvalidDataException("Installed version not found.");
         var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
+        Payload.Validate(directory);
         using (var stream = File.OpenRead(Payload.SafePath(directory, Payload.Required[0])))
             if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Installed PCK checksum mismatch.");
