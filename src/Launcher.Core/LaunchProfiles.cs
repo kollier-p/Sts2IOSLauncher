@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace Launcher.Core;
 
-public sealed record LaunchProfile(string Id, string Name, bool IsolateSaves, bool IsolateMods);
+public sealed record LaunchProfile(string Id, string Name, bool IsolateSaves, bool IsolateMods, string? PayloadId = null);
 
 public sealed record LaunchProfilePaths(string ModsDirectory, string? SaveDirectory, string? RelativeSavePath)
 {
@@ -71,6 +71,22 @@ public sealed class LaunchProfiles(string settingsFile, string documents)
         }
     }
 
+    public LaunchProfile BindVersion(string id, string? payloadId)
+    {
+        if (!ValidId(id) || (payloadId is not null && !PayloadStore.IsPayloadId(payloadId)))
+            throw new ArgumentException("Invalid launch profile or game version binding.");
+        lock (sync)
+        {
+            var config = Read();
+            var index = Array.FindIndex(config.Profiles, profile => profile.Id == id);
+            if (index < 0) throw new InvalidDataException("Launch profile not found.");
+            var updated = config.Profiles[index] with { PayloadId = payloadId };
+            config.Profiles[index] = updated;
+            Write(config);
+            return updated;
+        }
+    }
+
     public LaunchProfilePaths EnsureDirectories(LaunchProfile profile)
     {
         if (profile.Id != Default.Id && !ValidId(profile.Id))
@@ -80,8 +96,16 @@ public sealed class LaunchProfiles(string settingsFile, string documents)
         var relative = profile.IsolateSaves ? prefix + "/default/1" : null;
         var saves = relative is null ? null : Payload.SafePath(data, relative);
         Directory.CreateDirectory(mods);
+        SaveSnapshots.RecoverInterruptedRestore(saves ?? SnapshotSaveDirectory(profile));
         if (saves is not null) Directory.CreateDirectory(saves);
         return new(mods, saves, relative);
+    }
+
+    public string SnapshotSaveDirectory(LaunchProfile profile)
+    {
+        if (profile.Id != Default.Id && !ValidId(profile.Id))
+            throw new InvalidDataException("Invalid launch profile identity.");
+        return Payload.SafePath(data, profile.IsolateSaves ? $"LaunchProfiles/{profile.Id}/default/1" : "default/1");
     }
 
     Configuration Read()
@@ -90,7 +114,8 @@ public sealed class LaunchProfiles(string settingsFile, string documents)
         using var stream = File.OpenRead(settings);
         var config = JsonSerializer.Deserialize<Configuration>(stream) ?? throw new InvalidDataException("Invalid launch profiles.");
         if (config.Profiles is null || config.Profiles.Any(profile => profile is null ||
-                !ValidId(profile.Id) || !ValidName(profile.Name)) ||
+                !ValidId(profile.Id) || !ValidName(profile.Name) ||
+                (profile.PayloadId is not null && !PayloadStore.IsPayloadId(profile.PayloadId))) ||
             config.Profiles.Select(profile => profile.Id).Distinct(StringComparer.Ordinal).Count() != config.Profiles.Length ||
             config.Profiles.Select(profile => profile.Name).Append(Default.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != config.Profiles.Length + 1 ||
             (config.Active != Default.Id && !config.Profiles.Any(profile => profile.Id == config.Active)))

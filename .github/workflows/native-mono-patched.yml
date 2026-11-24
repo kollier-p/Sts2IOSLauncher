@@ -6,6 +6,10 @@ on:
         description: "Include FMOD/Spine (builder confirms applicable licensing)"
         type: boolean
         default: false
+      package_ipa:
+        description: "Create and verify an unsigned IPA on the runner"
+        type: boolean
+        default: false
   push:
     paths:
       - 'native/**'
@@ -16,6 +20,7 @@ on:
       - 'scripts/stage_extensions.py'
       - 'scripts/integrate_extensions.py'
       - 'scripts/build_extension_fixtures.py'
+      - 'scripts/package_native_ipa.py'
       - 'src/**'
       - '.github/workflows/native-mono-patched.yml'
 permissions:
@@ -65,6 +70,14 @@ jobs:
       - name: Compile Godot with extension integration fixtures
         if: inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
         run: python3 scripts/build_godot_host.py --extension-fixtures
+      - name: Verify IPA packaging
+        if: inputs.package_ipa == true || (inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true')
+        env:
+          INCLUDE_EXTENSIONS: ${{ inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true' }}
+        run: |
+          build_dir=.native-build
+          if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then build_dir+=/licensed-app; fi
+          python3 scripts/package_native_ipa.py "$build_dir/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
       - name: Preserve pre-IPA build output
         if: inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
         run: |
@@ -78,6 +91,12 @@ jobs:
             .native-build/staged-app.tar.gz
             .native-build/pre-ipa-report.json
             .native-build/extension-fixture-app/pre-ipa-report.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: inputs.package_ipa == true && inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
+        with:
+          name: STS2IOSLauncher-diagnostic-ipa
+          path: dist/STS2IOSLauncher.ipa
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

@@ -129,9 +129,13 @@ public sealed class PayloadStore(string root)
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return receipt;
     }
-    public (InstallReceipt Receipt, string Directory) VerifyForLaunch(CancellationToken ct = default)
+    public InstallReceipt? FindVersion(string payloadId)
+        => IsPayloadId(payloadId) ? InstalledVersions().SingleOrDefault(receipt => receipt.PayloadId == payloadId) : null;
+
+    public (InstallReceipt Receipt, string Directory) VerifyForLaunch(CancellationToken ct = default, string? payloadId = null)
     {
-        var receipt = Current() ?? throw new InvalidDataException("No installed game.");
+        var receipt = payloadId is null ? Current() : FindVersion(payloadId);
+        if (receipt is null) throw new InvalidDataException("The selected game version is unavailable.");
         var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
         if (receipt.InventorySha256 is null) throw new InvalidDataException("Legacy installation requires reinstallation for full verification.");
         PayloadIntegrity.Verify(directory, receipt.InventorySha256, ct);
@@ -194,5 +198,12 @@ public sealed class PayloadStore(string root)
         var prefix = $"{receipt.ManifestId}-";
         return validSource && receipt.PayloadId?.StartsWith(prefix, StringComparison.Ordinal) == true &&
                Guid.TryParseExact(receipt.PayloadId[prefix.Length..], "N", out _);
+    }
+
+    internal static bool IsPayloadId(string value)
+    {
+        var separator = value.IndexOf('-');
+        return separator > 0 && ulong.TryParse(value.AsSpan(0, separator), out var manifest) &&
+               manifest.ToString() == value[..separator] && Guid.TryParseExact(value.AsSpan(separator + 1), "N", out _);
     }
 }

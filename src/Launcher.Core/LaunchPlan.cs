@@ -3,9 +3,9 @@ namespace Launcher.Core;
 // Platform-neutral contract between the installer and the native game host.
 public sealed record LaunchPlan(InstallReceipt Receipt, string Pack, string Assemblies, string GameAssembly, string UserData)
 {
-    public static LaunchPlan Prepare(PayloadStore store, string userData, CancellationToken ct = default)
+    public static LaunchPlan Prepare(PayloadStore store, string userData, CancellationToken ct = default, string? payloadId = null)
     {
-        var (receipt, directory) = store.VerifyForLaunch(ct);
+        var (receipt, directory) = store.VerifyForLaunch(ct, payloadId);
         var data = Path.GetFullPath(userData);
         var root = Path.GetFullPath(store.Root);
         var relative = Path.GetRelativePath(root, data);

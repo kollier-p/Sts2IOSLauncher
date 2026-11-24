@@ -20,7 +20,7 @@ static BOOL started = NO;
 static InitHost initHost;
 static Command beginDownload, beginImport;
 static Reply reply;
-static Simple browseVersions, browseProfiles, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, browseSnapshots, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -61,7 +61,7 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
@@ -129,14 +129,15 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
     self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
+    self.snapshots=[self button:@"Save snapshots" action:@selector(snapshotsPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
-    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,self.installation,self.profile,self.play,self.profiles,self.versions,self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.progress,self.message,self.cancel]];
+    UIStackView *stack=[[UIStackView alloc]initWithArrangedSubviews:@[heading,self.installation,self.profile,self.play,self.profiles,self.versions,self.snapshots,self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget,self.progress,self.message,self.cancel]];
     stack.axis=UILayoutConstraintAxisVertical;stack.spacing=12;stack.translatesAutoresizingMaskIntoConstraints=NO;
     UIScrollView *scroll=[UIScrollView new];scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:24],[stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-24],[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48]]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=NO;
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -161,6 +162,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("Initialize",(void**)&initHost)==0 && get("BeginDownload",(void**)&beginDownload)==0 &&
                get("BeginImport",(void**)&beginImport)==0 && get("BrowseVersions",(void**)&browseVersions)==0 &&
                get("BrowseProfiles",(void**)&browseProfiles)==0 &&
+               get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -192,6 +194,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
     self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.play.enabled=idle && installed!=nil && profile!=nil;
+    self.snapshots.enabled=idle && profile!=nil;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -268,6 +271,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)versionsPressed { [self.view endEditing:YES];if(browseVersions()!=0)[self showError:@"Another operation is active."]; }
 - (void)profilesPressed { [self.view endEditing:YES];if(browseProfiles()!=0)[self showError:@"Another operation is active."]; }
+- (void)snapshotsPressed { [self.view endEditing:YES];if(browseSnapshots()!=0)[self showError:@"Another operation is active."]; }
 - (void)importPressed {
     [self.view endEditing:YES];
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];

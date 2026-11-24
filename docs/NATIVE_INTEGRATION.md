@@ -6,7 +6,7 @@ The Android launcher and its compatibility submodule are the feature reference. 
 
 The first compatibility hooks cover platform initialization, system diagnostics, telemetry opt-out, local mod paths and release information. The adapter checks the Harmony checksum and version before rewriting. Steamworks multiplayer, cloud, and Workshop require additional integration.
 
-Launch profiles can isolate saves and mods independently. The default profile uses the game's existing save routing and the shared `Documents/mods` folder. Isolated data lives under `Documents/LaunchProfiles`. The installed game version is selected separately. Isolated saves require the game's three save path methods from the Android compatibility contract.
+Launch profiles can isolate saves and mods independently and pin an installed game version. The default profile uses the game's existing save routing, the shared `Documents/mods` folder, and the global version. Isolated data lives under `Documents/LaunchProfiles`. Isolated saves require the game's three save path methods from the Android compatibility contract. Save snapshots use the profile's isolated saves or the shared `Documents/default/1` account directory. Restoring verifies the snapshot and backs up existing saves before switching directories.
 
 ## Native dependencies
 

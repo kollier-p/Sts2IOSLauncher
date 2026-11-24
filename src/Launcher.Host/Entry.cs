@@ -25,6 +25,7 @@ public static class Entry
     static string? assemblyRoot, adapterRoot, releaseInfo;
     static Assembly? loadedGame;
     static InstallReceipt? current;
+    static InstallReceipt? profileVersion;
     static State state = new("idle", "No game installed");
 
     sealed record Choice(string Value, string Title, string Detail);
@@ -62,8 +63,11 @@ public static class Entry
             try
             {
                 current = store.Current();
+                profileVersion = activeProfile?.PayloadId is string boundId ? store.FindVersion(boundId) : null;
                 Publish(activeProfile is null
                     ? new("error", "The active launch profile could not be read.")
+                    : activeProfile.PayloadId is not null && profileVersion is null
+                    ? new("error", "The pinned game version is unavailable. Choose another version for this profile.")
                     : new("idle", current is null ? "Install or import the game to get started." : "Ready to play."));
             }
             catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
@@ -102,7 +106,7 @@ public static class Entry
         byte[] json;
         lock (Sync) json = JsonSerializer.SerializeToUtf8Bytes(state with
         {
-            Installed = current?.DisplayName(),
+            Installed = (activeProfile?.PayloadId is null ? current : profileVersion)?.DisplayName(),
             Profile = activeProfile?.Name
         });
         if (buffer == 0 || capacity <= json.Length) return -json.Length - 1;
@@ -222,12 +226,23 @@ public static class Entry
             var selection = await Ask("version", "Installed versions", ct, choices);
             var selected = installations.SingleOrDefault(receipt => receipt.PayloadId == selection);
             if (selected is null) throw new InvalidDataException("Invalid installed version selection.");
-            if (selection == current?.PayloadId) return new("idle", "Selected version is already active.");
             var actions = new List<Choice>();
-            if (selected.InventorySha256 is not null)
-                actions.Add(new("activate", "Make active", "Verify the game files and switch to this version"));
-            actions.Add(new("remove", "Remove version", "Delete this inactive installation"));
+            var isCurrent = selection == current?.PayloadId;
+            if (!isCurrent && selected.InventorySha256 is not null)
+                actions.Add(new("activate", "Set as global version", "Use this version for profiles without a binding"));
+            if (activeProfile is { Id: not "default" } && selected.InventorySha256 is not null)
+                actions.Add(new("bind", "Use for this launch profile", activeProfile.Name));
+            if (!isCurrent && profiles?.List().Any(profile => profile.PayloadId == selection) != true)
+                actions.Add(new("remove", "Remove version", "Delete this inactive installation"));
+            if (actions.Count == 0) return new("idle", "This version is in use.");
             var action = await Ask("version-action", selected.DisplayName(), ct, actions.ToArray());
+            if (!actions.Any(choice => choice.Value == action)) throw new InvalidDataException("Invalid version action.");
+            if (action == "bind" && activeProfile is { Id: not "default" } && selected.InventorySha256 is not null)
+            {
+                ct.ThrowIfCancellationRequested();
+                SetProfile(profiles!.BindVersion(activeProfile.Id, selection), selected);
+                return new("idle", "Game version bound to the active launch profile.");
+            }
             if (action == "remove")
             {
                 var confirmation = await Ask("remove-version", "Remove this game version?", ct,
@@ -240,19 +255,23 @@ public static class Entry
             if (action != "activate" || selected.InventorySha256 is null)
                 throw new InvalidDataException("Invalid version action.");
             Publish(new("verify", "Verifying selected installation…"));
-            return SetCurrent(payloads.ActivateVersion(selection, ct), "Selected version is ready to play.");
+            return SetCurrent(payloads.ActivateVersion(selection, ct), "Global game version selected.");
         }) ? 0 : -1;
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseProfiles() => Start("Launch profile", new("profiles", "Reading launch profiles…"),
-        async (_, ct) =>
+        async (payloads, ct) =>
         {
             var stored = profiles ?? throw new InvalidOperationException("Launch profiles are unavailable.");
-            var choices = stored.List().Select(profile => new Choice(profile.Id, profile.Name,
+            var existing = stored.List();
+            var choices = existing.Select(profile => new Choice(profile.Id, profile.Name,
                 (profile.Id == activeProfile?.Id ? "Active · " : "") +
                 (profile.IsolateSaves ? "Isolated saves" : "Shared saves") + " · " +
-                (profile.IsolateMods ? "Isolated mods" : "Shared mods"))).ToList();
+                (profile.IsolateMods ? "Isolated mods" : "Shared mods") +
+                (profile.PayloadId is null ? "" : " · Pinned version"))).ToList();
             choices.Add(new("new", "New profile", "Choose which data to isolate"));
+            if (activeProfile?.PayloadId is not null)
+                choices.Add(new("unpin", "Follow the global version", activeProfile.Name));
             var selection = await Ask("profile", "Launch profiles", ct, choices.ToArray());
             LaunchProfile profile;
             if (selection == "new")
@@ -260,7 +279,7 @@ public static class Entry
                 var name = (await Ask("profile-name", "Name the launch profile", ct)).Trim();
                 if (name.Length is < 1 or > 64 || name.Any(char.IsControl))
                     return new("error", "Enter a profile name between 1 and 64 characters.");
-                if (choices.Any(choice => choice.Value != "new" && string.Equals(choice.Title, name, StringComparison.OrdinalIgnoreCase)))
+                if (existing.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
                     return new("error", "A profile with that name already exists.");
                 var isolation = await Ask("profile-isolation", "Choose what to isolate", ct,
                     [new("both", "Saves and mods", "Separate both directories for this profile"),
@@ -270,20 +289,68 @@ public static class Entry
                 ct.ThrowIfCancellationRequested();
                 profile = stored.Create(name, isolation != "mods", isolation != "saves");
             }
+            else if (selection == "unpin" && activeProfile?.PayloadId is not null)
+            {
+                ct.ThrowIfCancellationRequested();
+                profile = stored.BindVersion(activeProfile.Id, null);
+            }
             else
             {
                 ct.ThrowIfCancellationRequested();
                 profile = stored.Select(selection);
             }
-            lock (Sync) activeProfile = profile;
-            return new("idle", $"Launch profile selected: {profile.Name}.");
+            var bound = profile.PayloadId is string boundId ? payloads.FindVersion(boundId) : null;
+            SetProfile(profile, bound);
+            return profile.PayloadId is not null && bound is null
+                ? new("error", "The pinned game version is unavailable. Choose a version or follow the global version.")
+                : new("idle", $"Launch profile selected: {profile.Name}.");
         }) ? 0 : -1;
+
+    static void SetProfile(LaunchProfile profile, InstallReceipt? version)
+    {
+        lock (Sync)
+        {
+            activeProfile = profile;
+            profileVersion = version;
+        }
+    }
 
     static State SetCurrent(InstallReceipt receipt, string message)
     {
         lock (Sync) current = receipt;
         return new("installed", message);
     }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseSnapshots() => Start("Save snapshots", new("snapshots", "Reading save snapshots…"),
+        async (payloads, ct) =>
+        {
+            var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
+            var saveDirectory = profiles!.SnapshotSaveDirectory(profile);
+            var support = Path.GetDirectoryName(payloads.Root)!;
+            var snapshotDirectory = Payload.SafePath(support, $"SaveSnapshots/{(profile.IsolateSaves ? profile.Id : "shared")}");
+            var snapshots = new SaveSnapshots(saveDirectory, snapshotDirectory);
+            var list = snapshots.List();
+            var choices = new List<Choice> { new("new", "Create snapshot", "Back up the current saves and settings") };
+            choices.AddRange(list.Select(backup => new Choice(backup.Id,
+                backup.Created.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), $"{backup.Reason} · {backup.Files} files")));
+            var selection = await Ask("snapshot", "Save snapshots", ct, choices.ToArray());
+            if (selection == "new")
+            {
+                Publish(new("snapshots", "Backing up saves…"));
+                return snapshots.Create("Manual snapshot", ct) is null
+                    ? new("idle", "There are no saves in this profile to back up.")
+                    : new("idle", "Save snapshot created.");
+            }
+            if (!list.Any(backup => backup.Id == selection)) throw new InvalidDataException("Invalid snapshot selection.");
+            var action = await Ask("snapshot-restore", "Restore this save snapshot?", ct,
+                [new("keep", "Keep current saves", "Return to the launcher"),
+                 new("restore", "Back up and restore", "Save the current state before restoring this snapshot")]);
+            if (action != "restore") return new("idle", "Current saves kept.");
+            Publish(new("snapshots", "Verifying and restoring saves…"));
+            snapshots.Restore(selection, ct);
+            return new("idle", "Save snapshot restored.");
+        }) ? 0 : -1;
 
     static bool Start(string operation, State pending, Func<PayloadStore, CancellationToken, Task<State>> run)
     {
@@ -371,7 +438,7 @@ public static class Entry
     {
         if (NativeExtensionsAvailable() != 1) return new("error", "Play requires an extension-enabled launcher build.");
         if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
-        var plan = LaunchPlan.Prepare(payloads, documents, ct);
+        var plan = LaunchPlan.Prepare(payloads, documents, ct, activeProfile.PayloadId);
         launchProfilePaths = profiles!.EnsureDirectories(activeProfile);
         var adapter = Path.Combine(Path.GetDirectoryName(payloads.Root)!, "RuntimeAdapters", plan.Receipt.PayloadId);
         Directory.CreateDirectory(adapter);

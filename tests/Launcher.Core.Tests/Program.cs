@@ -189,6 +189,33 @@ try
     Assert(profiles.EnsureDirectories(savesOnly).ModsDirectory == sharedPaths.ModsDirectory, "Save isolation can share mods");
     Assert(profiles.Select(isolated.Id) == isolated && new LaunchProfiles(profileSettings, profileData).Current() == isolated,
         "Selected launch profile survives a restart");
+    var bound = profiles.BindVersion(isolated.Id, tar.PayloadId);
+    Assert(new LaunchProfiles(profileSettings, profileData).Current() == bound && bound.PayloadId == tar.PayloadId,
+        "Profile version survives a restart");
+    Assert(store.VerifyForLaunch(payloadId: bound.PayloadId).Receipt == tar && store.Current() == receipt,
+        "A profile can launch a verified version without changing the global version");
+    Reject(() => store.VerifyForLaunch(payloadId: "missing"));
+    Assert(profiles.BindVersion(isolated.Id, null) == isolated, "A profile can follow the global version again");
+    var saves = isolatedPaths.SaveDirectory!;
+    var backups = Path.Combine(root, "snapshots");
+    var snapshotStore = new SaveSnapshots(saves, backups);
+    Assert(snapshotStore.Create("Empty") is null, "Do not list empty snapshots");
+    var slot = Directory.CreateDirectory(Path.Combine(saves, "profile1", "saves")).FullName;
+    var saveFile = Path.Combine(slot, "current_run.save");
+    File.WriteAllText(saveFile, "first run");
+    var snapshot = snapshotStore.Create("Manual")!;
+    File.WriteAllText(saveFile, "second run");
+    Assert(snapshotStore.Restore(snapshot.Id) == snapshot && File.ReadAllText(saveFile) == "first run",
+        "Restore the exact selected snapshot");
+    var beforeRestore = snapshotStore.List().Single(backup => backup.Reason == "Before restore");
+    snapshotStore.Restore(beforeRestore.Id);
+    Assert(File.ReadAllText(saveFile) == "second run", "The pre-restore backup can recover the original save");
+    File.AppendAllText(Path.Combine(backups, snapshot.Id, "files", "profile1", "saves", "current_run.save"), "corrupt");
+    Reject(() => snapshotStore.Restore(snapshot.Id));
+    Assert(File.ReadAllText(saveFile) == "second run", "A failed snapshot verification preserves live saves");
+    Directory.Move(saves, saves + ".before-restore");
+    SaveSnapshots.RecoverInterruptedRestore(saves);
+    Assert(File.ReadAllText(saveFile) == "second run", "Interrupted restore recovers the previous save directory");
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");
