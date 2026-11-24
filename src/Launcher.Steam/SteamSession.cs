@@ -143,9 +143,8 @@ public sealed class SteamSession : IAsyncDisposable
         if (selected.Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != selected.Length || !Payload.Required.All(p => selected.Any(x => x.Path == p))) throw new InvalidDataException("Duplicate or missing manifest payload files.");
         foreach (var x in selected) if (!string.IsNullOrEmpty(x.File.LinkTarget) || x.File.Flags.HasFlag(EDepotFileFlag.Symlink)) throw new InvalidDataException("Symlink entries unsupported.");
         long total = selected.Sum(x => checked((long)x.File.TotalSize)), done = 0;
-        Directory.CreateDirectory(store.Root);
         // Serialize installers across sessions; the OS releases this lock on process exit.
-        using var installLock = new FileStream(Path.Combine(store.Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        using var installLock = store.AcquireWriteLock();
         var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
         Directory.CreateDirectory(staging);
         var progressLock = new object();

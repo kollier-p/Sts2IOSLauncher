@@ -1,4 +1,5 @@
 using Launcher.Core;
+using System.IO.Compression;
 using System.Text;
 using System.Security.Cryptography;
 
@@ -55,6 +56,37 @@ try
     Assert(spine.Contains("ios.arm64 = \"res://native/Sts2Spine.framework\""), "iOS Spine framework descriptor");
     Reject(()=>PckExtensions.RewriteDescriptor(extensionConfig,"wrong_symbol"));
     Assert(PckExtensions.RewriteDescriptor(rewritten,"fmod_library_init").Contains("ios.arm64"),"Extension patch repeatable");
+    var extensionPack = Path.Combine(root, "extension-test.pck");
+    using (var file = File.Create(extensionPack))
+    using (var writer = new BinaryWriter(file))
+    {
+        var descriptors = new[]
+        {
+            ("addons/custom/fmod.gdextension", Encoding.UTF8.GetBytes(extensionConfig)),
+            ("plugins/spine_runtime.gdextension", Encoding.UTF8.GetBytes(extensionConfig.Replace("fmod_library_init", "spine_godot_library_init"))),
+            ("plugins/unrelated.gdextension", Encoding.UTF8.GetBytes("[configuration]\nentry_symbol = \"unrelated\"\n"))
+        };
+        writer.Write(0x43504447u); writer.Write(3u); writer.Write(4u); writer.Write(5u); writer.Write(0u);
+        writer.Write(0u); writer.Write(0ul); writer.Write(1024ul);
+        file.Position = 104;
+        var offsets = new List<long>();
+        foreach (var descriptor in descriptors)
+        {
+            offsets.Add(file.Position);
+            writer.Write(descriptor.Item2);
+        }
+        file.Position = 1024;
+        writer.Write((uint)descriptors.Length);
+        for (var i = 0; i < descriptors.Length; i++)
+        {
+            var name = Encoding.UTF8.GetBytes(descriptors[i].Item1);
+            var data = descriptors[i].Item2;
+            writer.Write((uint)name.Length); writer.Write(name); writer.Write((ulong)offsets[i]);
+            writer.Write((ulong)data.Length); writer.Write(MD5.HashData(data)); writer.Write(0u);
+        }
+    }
+    Assert(PckExtensions.Patch(extensionPack) == 2, "Locate the two supported descriptors by entry symbol");
+    Assert(PckExtensions.Patch(extensionPack) == 2, "Rewriting extension paths is repeatable");
     var receipt = store.Install(stage, 123, "public");
     Assert(store.Current() == receipt, "Persistent receipt");
     var broken = store.NewStaging(); Reject(() => store.Install(broken, 456, "public"));
@@ -86,6 +118,27 @@ try
     File.AppendAllText(Path.Combine(root, "payload-" + newer.PayloadId, Payload.Required[0]), "corruption");
     Reject(() => store.ActivateVersion(newer.PayloadId));
     Assert(store.Current() == receipt, "Corrupt rollback preserves active version");
+    var archiveInput = Path.Combine(root, "archive-input"); Directory.CreateDirectory(archiveInput); Fixture(archiveInput);
+    var zipPath = Path.Combine(root, "Windows backup.zip");
+    using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+    {
+        foreach (var item in Payload.Required)
+            zip.CreateEntryFromFile(Path.Combine(archiveInput, item), "Steam library/Game/" + item);
+        zip.CreateEntry("Steam library/Game/SlayTheSpire2.exe");
+    }
+    var imported = ArchiveImport.ImportZipAsync(store, zipPath, null, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(imported.DepotId == 0 && imported.ManifestId == 0 && imported.DisplayName() == "Windows backup",
+        "Imported installs carry their own source identity");
+    Assert(store.VerifyForLaunch().Receipt == imported && store.InstalledVersions().Contains(imported), "Verified ZIP install is selectable");
+    Assert(!File.Exists(Path.Combine(root, "payload-" + imported.PayloadId, "SlayTheSpire2.exe")), "Import skips PC executables");
+    var badZip = Path.Combine(root, "unsafe.zip");
+    using (var zip = ZipFile.Open(badZip, ZipArchiveMode.Create)) { zip.CreateEntry("../escape.dll"); }
+    Reject(() => ArchiveImport.ImportZipAsync(store, badZip, null, CancellationToken.None).GetAwaiter().GetResult());
+    using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Update))
+        zip.CreateEntry("Steam library/Game/" + Payload.AssemblyDirectory + "/STS2.dll");
+    Reject(() => ArchiveImport.ImportZipAsync(store, zipPath, null, CancellationToken.None).GetAwaiter().GetResult());
+    Assert(store.Current() == imported, "Failed imports preserve the active installation");
+    Assert(store.ActivateVersion(receipt.PayloadId) == receipt, "Steam version can replace a ZIP selection");
     using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
     Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
     Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");
@@ -115,6 +168,6 @@ try
     Reject(() => store.VerifyForLaunch());
     Reject(() => store.ActivateVersion(receipt.PayloadId));
     Assert(store.Current() == receipt, "Integrity failure never changes active pointer");
-    Console.WriteLine("All payload, download, chunk, meter, integrity and rollback fixture assertions passed.");
+    Console.WriteLine("All payload, archive import, download, chunk, meter, integrity and rollback fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

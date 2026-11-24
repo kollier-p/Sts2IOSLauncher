@@ -46,14 +46,30 @@ public static class Payload
     }
 }
 
-public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId, string? InventorySha256 = null);
+public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId, string? InventorySha256 = null)
+{
+    public string DisplayName() => DepotId == Payload.WindowsDepot ? $"{Branch} / {ManifestId}" : Branch;
+}
 public sealed class PayloadStore(string root)
 {
     public string Root { get; } = Path.GetFullPath(root);
     public string NewStaging() { Directory.CreateDirectory(Root); return Directory.CreateDirectory(Path.Combine(Root, "stage-" + Guid.NewGuid().ToString("N"))).FullName; }
+    public FileStream AcquireWriteLock()
+    {
+        Directory.CreateDirectory(Root);
+        return new FileStream(Path.Combine(Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    }
+
     public InstallReceipt Install(string staging, ulong manifestId, string branch, CancellationToken ct = default)
     {
         if (manifestId == 0 || string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Invalid source identity.");
+        return Install(staging, Payload.WindowsDepot, manifestId, branch, ct);
+    }
+
+    internal InstallReceipt InstallArchive(string staging, string name, CancellationToken ct) => Install(staging, 0, 0, name, ct);
+
+    InstallReceipt Install(string staging, uint depotId, ulong manifestId, string source, CancellationToken ct)
+    {
         if (Path.GetDirectoryName(Path.GetFullPath(staging)) != Root || !Path.GetFileName(staging).StartsWith("stage-", StringComparison.Ordinal)) throw new ArgumentException("Staging must be owned by this store.");
         ct.ThrowIfCancellationRequested(); Payload.Validate(staging);
         var patched = PckPatcher.Patch(Payload.SafePath(staging, Payload.Required[0]));
@@ -61,7 +77,7 @@ public sealed class PayloadStore(string root)
         using var file = File.OpenRead(Payload.SafePath(staging, Payload.Required[0]));
         var hash = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant(); file.Dispose();
         var id = $"{manifestId}-{Guid.NewGuid():N}";
-        var receipt = new InstallReceipt(Payload.AppId, Payload.WindowsDepot, manifestId, branch, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct));
+        var receipt = new InstallReceipt(Payload.AppId, depotId, manifestId, source, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct));
         File.WriteAllText(Path.Combine(staging, ".payload_manifest.json"), JsonSerializer.Serialize(receipt));
         ct.ThrowIfCancellationRequested();
         var destination = Path.Combine(Root, "payload-" + id);
@@ -83,10 +99,7 @@ public sealed class PayloadStore(string root)
                 var name = Path.GetFileName(directory);
                 var safe = Payload.SafePath(Root, name);
                 var receipt = JsonSerializer.Deserialize<InstallReceipt>(File.ReadAllText(Payload.SafePath(safe, ".payload_manifest.json")));
-                if (receipt is null || receipt.AppId != Payload.AppId || receipt.DepotId != Payload.WindowsDepot ||
-                    receipt.ManifestId == 0 || name != "payload-" + receipt.PayloadId ||
-                    !receipt.PayloadId.StartsWith(receipt.ManifestId + "-", StringComparison.Ordinal) ||
-                    !Guid.TryParseExact(receipt.PayloadId[(receipt.ManifestId.ToString().Length + 1)..], "N", out _)) continue;
+                if (receipt is null || !ValidIdentity(receipt) || name != "payload-" + receipt.PayloadId) continue;
                 Payload.Validate(safe);
                 versions.Add(receipt);
             }
@@ -94,21 +107,22 @@ public sealed class PayloadStore(string root)
         }
         return versions.OrderBy(x => x.ManifestId).ThenBy(x => x.PayloadId, StringComparer.Ordinal).ToArray();
     }
-    public InstallReceipt ActivateVersion(string payloadId)
+    public InstallReceipt ActivateVersion(string payloadId, CancellationToken ct = default)
     {
-        Directory.CreateDirectory(Root);
-        using var installLock = new FileStream(Path.Combine(Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        using var installLock = AcquireWriteLock();
+        ct.ThrowIfCancellationRequested();
         var receipt = InstalledVersions().SingleOrDefault(x => x.PayloadId == payloadId)
             ?? throw new InvalidDataException("Installed version not found.");
         var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
         using (var stream = File.OpenRead(Payload.SafePath(directory, Payload.Required[0])))
             if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Installed PCK checksum mismatch.");
-        if (receipt.InventorySha256 is not null) PayloadIntegrity.Verify(directory, receipt.InventorySha256);
+        if (receipt.InventorySha256 is not null) PayloadIntegrity.Verify(directory, receipt.InventorySha256, ct);
         var temp = Path.Combine(Root, "current-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
             using (var stream = new FileStream(temp, FileMode.CreateNew)) { JsonSerializer.Serialize(stream, receipt); stream.Flush(true); }
+            ct.ThrowIfCancellationRequested();
             File.Move(temp, Path.Combine(Root, "current.json"), true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
@@ -127,8 +141,18 @@ public sealed class PayloadStore(string root)
         var pointer = Path.Combine(Root, "current.json");
         if (!File.Exists(pointer)) return null;
         var receipt = JsonSerializer.Deserialize<InstallReceipt>(File.ReadAllText(pointer)) ?? throw new InvalidDataException("Invalid install receipt.");
-        if (receipt.AppId != Payload.AppId || receipt.DepotId != Payload.WindowsDepot || receipt.ManifestId == 0 || !receipt.PayloadId.StartsWith(receipt.ManifestId + "-", StringComparison.Ordinal) || !Guid.TryParseExact(receipt.PayloadId[(receipt.ManifestId.ToString().Length + 1)..], "N", out _)) throw new InvalidDataException("Invalid payload identity.");
+        if (!ValidIdentity(receipt)) throw new InvalidDataException("Invalid payload identity.");
         var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId); Payload.Validate(directory);
         return receipt;
+    }
+
+    static bool ValidIdentity(InstallReceipt receipt)
+    {
+        if (receipt.AppId != Payload.AppId || string.IsNullOrWhiteSpace(receipt.Branch)) return false;
+        var validSource = receipt.DepotId == Payload.WindowsDepot && receipt.ManifestId != 0 ||
+                          receipt.DepotId == 0 && receipt.ManifestId == 0;
+        var prefix = $"{receipt.ManifestId}-";
+        return validSource && receipt.PayloadId?.StartsWith(prefix, StringComparison.Ordinal) == true &&
+               Guid.TryParseExact(receipt.PayloadId[prefix.Length..], "N", out _);
     }
 }

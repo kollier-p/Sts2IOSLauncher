@@ -40,7 +40,7 @@ def main():
     old='lastKnownFileType = sourcecode.cpp.cpp; path = dummy.cpp;'
     if old not in text:raise SystemExit("Godot dummy source layout changed")
     text=text.replace(old,'lastKnownFileType = sourcecode.cpp.objcpp; path = dummy.cpp;')
-    text=re.sub(r'(OTHER_LDFLAGS = ")([^"]*)(";)',lambda m:m[1]+m[2]+' -framework Security -framework AVFoundation -Wl,-export_dynamic'+m[3],text)
+    text=re.sub(r'(OTHER_LDFLAGS = ")([^"]*)(";)',lambda m:m[1]+m[2]+' -framework Security -framework AVFoundation -framework UniformTypeIdentifiers -Wl,-export_dynamic'+m[3],text)
     pbx.write_text(text)
     shutil.copy2(ROOT/"native/HostGate.mm",src/"HostGate.mm")
     with dummy.open("a") as f:f.write('\n#include "HostGate.mm"\n')

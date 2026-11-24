@@ -6,19 +6,16 @@ namespace Launcher.Core;
 // Use the native extensions supplied by the launcher in the copy sent to Godot.
 public static class PckExtensions
 {
-    static readonly Dictionary<string,string> Symbols=new(StringComparer.Ordinal){
-        ["addons/fmod/fmod.gdextension"]="fmod_library_init",
-        ["addons/spine/spine_godot_extension.gdextension"]="spine_godot_library_init"
+    static readonly Dictionary<string,string> Libraries=new(StringComparer.Ordinal){
+        ["fmod_library_init"]="res://native/Sts2Fmod.framework",
+        ["spine_godot_library_init"]="res://native/Sts2Spine.framework"
     };
+    static readonly Regex EntrySymbol = new(@"(?m)^[ \t]*entry_symbol[ \t]*=[ \t]*""([A-Za-z0-9_]+)""[ \t]*\r?$");
     public static string RewriteDescriptor(string text,string symbol)
     {
-        var library = symbol switch
-        {
-            "fmod_library_init" => "res://native/Sts2Fmod.framework",
-            "spine_godot_library_init" => "res://native/Sts2Spine.framework",
-            _ => throw new InvalidDataException("Unsupported extension entry symbol: " + symbol)
-        };
-        if(!Regex.IsMatch(text,@"(?m)^\s*entry_symbol\s*=\s*"""+Regex.Escape(symbol)+@"""\s*$"))
+        if(!Libraries.TryGetValue(symbol,out var library)) throw new InvalidDataException("Unsupported extension entry symbol: " + symbol);
+        var matches=EntrySymbol.Matches(text);
+        if(matches.Count!=1 || matches[0].Groups[1].Value!=symbol)
             throw new InvalidDataException("Unexpected extension entry symbol: "+symbol);
         var sections=Regex.Split(text,@"(?m)(^\s*\[[^\r\n]+\]\s*$)");
         bool libraries=false;
@@ -63,18 +60,21 @@ public static class PckExtensions
             if(table.Length>128*1024*1024)throw new InvalidDataException("Directory too large");
             var normalized=Encoding.UTF8.GetString(name).TrimEnd('\0');
             if(normalized.StartsWith("res://"))normalized=normalized[6..];
-            if(!Symbols.TryGetValue(normalized,out var symbol))continue;
-            if(!found.Add(normalized))throw new InvalidDataException("Duplicate extension descriptor");
+            if(!normalized.EndsWith(".gdextension",StringComparison.Ordinal))continue;
             var next=f.Position;
             using var m=new BinaryReader(new MemoryStream(metadata));
             var offset=checked(baseOffset+m.ReadUInt64());var size=m.ReadUInt64();m.ReadBytes(16);var ef=m.ReadUInt32();
-            if(ef!=0||size>1024*1024||offset>=dir||size>dir-offset)throw new InvalidDataException("Invalid extension descriptor");
+            if(ef!=0||size>1024*1024||offset>=dir||size>dir-offset)continue;
             f.Position=(long)offset;var data=r.ReadBytes((int)size);
             if(data.Length!=(int)size)throw new EndOfStreamException();
-            changes.Add((position,Encoding.UTF8.GetBytes(RewriteDescriptor(Encoding.UTF8.GetString(data),symbol))));
             f.Position=next;
+            var descriptor=Encoding.UTF8.GetString(data);
+            var symbol=EntrySymbol.Match(descriptor).Groups[1].Value;
+            if(!Libraries.ContainsKey(symbol))continue;
+            if(!found.Add(symbol))throw new InvalidDataException("Duplicate extension descriptor: "+symbol);
+            changes.Add((position,Encoding.UTF8.GetBytes(RewriteDescriptor(descriptor,symbol))));
         }
-        if(f.Position!=f.Length||found.Count!=Symbols.Count)throw new InvalidDataException("Required extension descriptors missing or invalid");
+        if(f.Position!=f.Length||found.Count!=Libraries.Count)throw new InvalidDataException("Required extension descriptors missing or invalid");
         // Append the updated resource bodies and rebuild the directory; never
         // overwrite original descriptor data and never change resource names.
         f.Position=(long)dir;

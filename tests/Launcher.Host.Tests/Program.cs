@@ -7,7 +7,9 @@ unsafe
     delegate* unmanaged[Cdecl]<nint, nint, nint, int> initialize = &Entry.Initialize;
     delegate* unmanaged[Cdecl]<nint, int, int> copyStatus = &Entry.CopyStatus;
     delegate* unmanaged[Cdecl]<nint, int> download = &Entry.BeginDownload;
-    delegate* unmanaged[Cdecl]<nint, int> reply = &Entry.Reply;
+    delegate* unmanaged[Cdecl]<nint, int> import = &Entry.BeginImport;
+    delegate* unmanaged[Cdecl]<nint, long, int> reply = &Entry.Reply;
+    delegate* unmanaged[Cdecl]<int> versions = &Entry.BrowseVersions;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
@@ -15,7 +17,9 @@ unsafe
 
     Check(prepare() == -1, "An uninitialized host rejects launch");
     Check(cancel() == 0, "Cancel is safe while idle");
-    Check(reply(0) == -1, "A reply needs a live Steam prompt");
+    Check(reply(0, 1) == -1, "A reply needs a live Steam prompt");
+    Check(import(0) == -2, "Import rejects an invalid archive path");
+    Check(versions() == -1, "Version selection needs an initialized host");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
 
