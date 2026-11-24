@@ -106,13 +106,33 @@ public sealed class SteamSession : IAsyncDisposable
         if (selected.Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != selected.Length || !Payload.Required.All(p => selected.Any(x => x.Path == p))) throw new InvalidDataException("Duplicate or missing manifest payload files.");
         foreach (var x in selected) if (!string.IsNullOrEmpty(x.File.LinkTarget) || x.File.Flags.HasFlag(EDepotFileFlag.Symlink)) throw new InvalidDataException("Symlink entries unsupported.");
         long total = selected.Sum(x => checked((long)x.File.TotalSize)), done = 0;
-        var staging = store.NewStaging();
+        Directory.CreateDirectory(store.Root);
+        // Serialize installers across sessions; the OS releases this lock on process exit.
+        using var installLock = new FileStream(Path.Combine(store.Root, ".download.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
+        Directory.CreateDirectory(staging);
+        bool processing = false;
         try
         {
             foreach (var (file, relative) in selected)
             {
                 ct.ThrowIfCancellationRequested();
                 var output = Payload.SafePath(staging, relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                // Reuse only complete files whose length and Steam manifest hash match.
+                if (File.Exists(output))
+                {
+                    bool valid;
+                    using (var existing = File.OpenRead(output))
+                        valid = existing.Length == checked((long)file.TotalSize) &&
+                            CryptographicOperations.FixedTimeEquals(SHA1.HashData(existing), file.FileHash);
+                    if (valid)
+                    {
+                        done += checked((long)file.TotalSize);
+                        progress?.Report(new("download", done, total));
+                        continue;
+                    }
+                    File.Delete(output);
+                }
                 using (var stream = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
                     ulong cursor = 0;
@@ -132,11 +152,12 @@ public sealed class SteamSession : IAsyncDisposable
                 using var read = File.OpenRead(output);
                 if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(read), file.FileHash)) throw new InvalidDataException("Downloaded file hash mismatch.");
             }
+            processing = true;
             progress?.Report(new("process", done, total));
             var receipt = store.Install(staging, manifestId, branch, ct);
             progress?.Report(new("readyToRelaunch", done, total)); return receipt;
         }
-        finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+        finally { if (processing && Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
     void RequireSession() { if (!authenticated) throw new InvalidOperationException("Steam login required."); }
     public async ValueTask DisposeAsync() { stop.Cancel(); client.Disconnect(); await pump; stop.Dispose(); }
