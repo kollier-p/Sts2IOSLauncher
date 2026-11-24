@@ -49,11 +49,11 @@ jobs:
           dotnet run --project src/Launcher.AdapterTool/Launcher.AdapterTool.csproj -c Release -- corelib .native-build/runtime-distribution/Managed/System.Private.CoreLib.dll .native-build/runtime-distribution/Managed/STS2JitSupport.dll .native-build/CoreLib.patched.dll
           mv .native-build/CoreLib.patched.dll .native-build/runtime-distribution/Managed/System.Private.CoreLib.dll
       - name: Compile licensed native extension inputs
-        if: inputs.include_extensions == true
+        if: inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true'
         run: python3 scripts/stage_extensions.py .native-build/extensions
       - name: Export Godot host and package experimental IPA
         env:
-          INCLUDE_EXTENSIONS: ${{ inputs.include_extensions }}
+          INCLUDE_EXTENSIONS: ${{ inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true' }}
         run: |
           if [ "$INCLUDE_EXTENSIONS" = "true" ]; then
             python3 scripts/build_godot_host.py --extensions

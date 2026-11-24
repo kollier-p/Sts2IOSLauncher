@@ -119,6 +119,7 @@ public static class Entry
         lock(Sync){if(active is not null||store is null)return -1;active=cts=new();}
         _=Task.Run(()=>{
             try {
+                if(NativeExtensionsAvailable()!=1){Publish(new("error","This diagnostic IPA does not include the native game extensions. Install an extension-enabled build to play."));return;}
                 Publish(new("verify","Verifying installation"));
                 var plan=LaunchPlan.Prepare(store!,documents,cts.Token);
                 // Keep the verified immutable payload unchanged. Godot uses a stable user:// pack.
@@ -132,7 +133,7 @@ public static class Entry
                 releaseInfo=Path.Combine(Path.GetDirectoryName(plan.Pack)!,"release_info.json");
                 var link=Path.Combine(documents,"StS2.pck");
                 var temporary=link+"."+Guid.NewGuid().ToString("N")+".tmp";
-                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); PckScripts.Add(temporary,plan.GameAssembly,cts.Token); File.Move(temporary,link,true); }
+                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); PckScripts.Add(temporary,plan.GameAssembly,cts.Token); PckExtensions.Patch(temporary,cts.Token); File.Move(temporary,link,true); }
                 finally {if(File.Exists(temporary))File.Delete(temporary);}
                 Publish(new("ready","Game verified. Starting Godot."));
             } catch(OperationCanceledException){Publish(new("idle","Launch cancelled"));}
@@ -141,6 +142,8 @@ public static class Entry
         });
         return 0;
     }
+    [DllImport("__Internal",EntryPoint="sts2_extensions_available")]
+    static extern int NativeExtensionsAvailable();
     [DllImport("libSystem.B.dylib",EntryPoint="clonefile",SetLastError=true)]
     static extern int NativeClone([MarshalAs(UnmanagedType.LPUTF8Str)] string source,[MarshalAs(UnmanagedType.LPUTF8Str)] string target,int flags);
     public static int StartGameHooks() {

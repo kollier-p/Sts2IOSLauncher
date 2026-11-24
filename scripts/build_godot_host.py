@@ -48,7 +48,7 @@ def main():
         shutil.copy2(ROOT/"native/ExtensionRegistry.mm",src/"ExtensionRegistry.mm")
         with dummy.open("a") as f:f.write('\n#define STS2_NATIVE_EXTENSIONS 1\n#include "ExtensionRegistry.mm"\n')
     else:
-        with dummy.open("a") as f:f.write('\nvoid sts2_register_extensions() {}\n')
+        with dummy.open("a") as f:f.write('\nvoid sts2_register_extensions() {}\nextern "C" __attribute__((visibility("default"),used)) int sts2_extensions_available() { return 0; }\n')
     run("xcodebuild","-project",xproj,"-scheme","Sts2Host","-configuration","Release","-destination","generic/platform=iOS","-derivedDataPath",WORK/"godot-derived","CODE_SIGNING_ALLOWED=NO","CODE_SIGNING_REQUIRED=NO","DEVELOPMENT_TEAM=","build")
     app=WORK/"godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
     if not app.is_dir():raise SystemExit("Godot application missing")
