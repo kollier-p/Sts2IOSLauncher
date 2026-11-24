@@ -78,6 +78,17 @@ try
     Assert(liveSample.Completed == 600 && liveSample.Estimate.BytesPerSecond == 100 && liveSample.Estimate.Remaining == TimeSpan.FromSeconds(4), "Mixed cached and live transfer ETA");
     Reject(() => meter.Add(401, true, TimeSpan.FromSeconds(3)));
     Assert(store.VerifyForLaunch().Receipt == receipt, "Verified launch payload");
+    var launchData = root + "-saves";
+    try
+    {
+        var plan = LaunchPlan.Prepare(store, launchData);
+        Assert(plan.Receipt == receipt && File.Exists(plan.Pack) && File.Exists(plan.GameAssembly), "Launch plan points to verified payload");
+        Assert(plan.EngineArguments().Contains(plan.Pack), "Engine arguments select verified pack");
+        Assert(Directory.Exists(launchData), "Persistent save directory");
+        Reject(() => LaunchPlan.Prepare(store, Path.Combine(root, "saves")));
+        Reject(() => LaunchPlan.Prepare(store, launchData, new CancellationToken(true)));
+    }
+    finally { if (Directory.Exists(launchData)) Directory.Delete(launchData, true); }
     var installedAssembly = Path.Combine(root, "payload-" + receipt.PayloadId, Payload.Required[2]);
     File.AppendAllText(installedAssembly, "corrupt assembly");
     Reject(() => store.VerifyForLaunch());
