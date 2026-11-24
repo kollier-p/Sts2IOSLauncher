@@ -1,0 +1,30 @@
+name: Patched native Mono
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'native/mono/**'
+      - 'scripts/build_native_mono.py'
+      - '.github/workflows/native-mono-patched.yml'
+permissions:
+  contents: read
+jobs:
+  mono:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/build_native_mono.py --patched
+      - name: Compile memory alias implementation
+        run: |
+          xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc -c native/mono/MonoJitMemory.mm -o .native-build/mono-patched/MonoJitMemory.o
+          xcrun lipo -verify_arch arm64 .native-build/mono-patched/MonoJitMemory.o
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patched-mono-arm64
+          path: |
+            .native-build/mono-patched/mono/mini/*.a
+            .native-build/mono-patched/MonoJitMemory.o
+          if-no-files-found: error
