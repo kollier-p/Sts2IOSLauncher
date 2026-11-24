@@ -17,11 +17,19 @@ static class Program
 [Register("AppDelegate")]
 public sealed class AppDelegate : UIApplicationDelegate
 {
+    public override bool FinishedLaunching(UIApplication application, NSDictionary? options) => true;
+}
+
+[Register("SceneDelegate")]
+public sealed class SceneDelegate : UIWindowSceneDelegate
+{
     public override UIWindow? Window { get; set; }
-    public override bool FinishedLaunching(UIApplication application, NSDictionary? options)
+    public override void WillConnect(UIScene scene, UISceneSession session, UISceneConnectionOptions connectionOptions)
     {
-        Window = new UIWindow(UIScreen.MainScreen.Bounds);
-        ResetLauncher(); Window.MakeKeyAndVisible(); return true;
+        if (scene is not UIWindowScene windowScene) return;
+        Window = new UIWindow(windowScene);
+        ResetLauncher();
+        Window.MakeKeyAndVisible();
     }
     internal void ResetLauncher() => Window!.RootViewController = new SetupController(this);
 }
@@ -49,7 +57,7 @@ static class IdentityVault
     public static void Clear() { using var q = Query(); var result = SecKeyChain.Remove(q); if (result != SecStatusCode.Success && result != SecStatusCode.ItemNotFound) throw new InvalidOperationException("Unable to remove Steam Keychain session."); }
 }
 
-sealed class SetupController(AppDelegate app) : UIViewController
+sealed class SetupController(SceneDelegate app) : UIViewController
 {
     readonly PayloadStore store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "STS2Payloads"));
     readonly UILabel status = new() { Lines = 0, TextColor = UIColor.White };
