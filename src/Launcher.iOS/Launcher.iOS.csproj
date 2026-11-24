@@ -8,6 +8,15 @@
     <ApplicationId>org.sts2mobile.ioslauncher</ApplicationId>
     <PublishAot>false</PublishAot>
     <UseInterpreter>true</UseInterpreter>
+    <TrimMode>full</TrimMode>
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Launcher.Steam/Launcher.Steam.csproj"/></ItemGroup>
+  <ItemGroup>
+    <TrimmerRootAssembly Include="Launcher.Core"/>
+    <TrimmerRootAssembly Include="Launcher.Steam"/>
+    <TrimmerRootAssembly Include="SteamKit2"/>
+    <TrimmerRootAssembly Include="protobuf-net"/>
+    <TrimmerRootAssembly Include="protobuf-net.Core"/>
+  </ItemGroup>
 </Project>
