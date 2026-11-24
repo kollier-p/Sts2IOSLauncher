@@ -45,11 +45,20 @@ jobs:
           version=0.1.0
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -v:minimal \
+          # Use the classic linker to test compatibility with the SDK's native libraries.
+          dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -v:minimal -bl:ios-build.binlog \
             -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false \
-            -p:MtouchExtraArgs="--gcc_flags=-Wl%2C-ignore_auto_link_framework%2CDiskArbitration" \
+            -p:MtouchExtraArgs="--gcc_flags=-Wl%2C-ld_classic" \
             -p:BuildIpa=false -p:ApplicationId="io.github.$owner.sts2ioslauncher" \
             -p:ApplicationDisplayVersion="$version" -p:ApplicationVersion="$GITHUB_RUN_NUMBER"
+      - name: Upload native build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: ios-build.binlog
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Package and scan IPA
         run: |
           python3 scripts/package_ipa.py
