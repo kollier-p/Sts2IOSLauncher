@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
-void sts2_register_extensions();
 
 extern "C" int csops(pid_t,unsigned int,void*,size_t);
 using InitRuntime = int (*)(const char*,const char*,const char*);
@@ -21,6 +20,7 @@ static Command beginDownload, reply;
 static Simple cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
+__attribute__((visibility("default")))
 @interface LauncherGate : UIViewController
 @property(nonatomic,strong) id service;
 @property(nonatomic,strong) UIApplication *application;
@@ -134,7 +134,6 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
     if([stage isEqual:@"ready"]){
         [self.timer invalidate];self.message.text=@"Starting Godot…";
-        sts2_register_extensions();
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
         if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
         else{self.message.text=@"Godot startup failed. Restart the app.";}

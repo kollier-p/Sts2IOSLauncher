@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'tests/Launcher.Host.Tests/**'
       - '.github/workflows/managed-host-tests.yml'
   workflow_dispatch:
 jobs:
@@ -13,6 +14,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 9.0.318
-      - run: dotnet build src/Launcher.Host/Launcher.Host.csproj -c Release
+      - run: dotnet run --project tests/Launcher.Host.Tests/Launcher.Host.Tests.csproj -c Release
       - run: dotnet build src/STS2JitSupport/STS2JitSupport.csproj -c Release
       - run: dotnet build src/Launcher.AdapterTool/Launcher.AdapterTool.csproj -c Release

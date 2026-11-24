@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - 'native/ExtensionSupport.mm'
+      - 'scripts/stage_extensions.py'
       - 'scripts/integrate_extensions.py'
       - '.github/workflows/extension-link.yml'
 permissions:
@@ -16,11 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/stage_extensions.py .native-build/extensions
-      - name: Validate static extension linking
+      - name: Validate ARM64 extension framework linkage
         run: |
-          mkdir -p .native-build/link-test.xcodeproj
-          printf 'OTHER_LDFLAGS = "-ObjC";\n' > .native-build/link-test.xcodeproj/project.pbxproj
-          python3 scripts/integrate_extensions.py .native-build/link-test.xcodeproj .native-build/extensions
-          cat .native-build/link-test.xcodeproj/project.pbxproj
-          printf 'int main(){return 0;}\n' > .native-build/link-test.cpp
-          xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" .native-build/link-test.cpp $(for f in .native-build/NativeExtensions/*.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework UIKit -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreMedia -o .native-build/link-test
+          python3 scripts/integrate_extensions.py .native-build/extensions .native-build/ExtensionFrameworks
+          cat > .native-build/link-test.cpp <<'CPP'
+          extern "C" unsigned char fmod_library_init(void *, void *, void *);
+          extern "C" unsigned char spine_godot_library_init(void *, void *, void *);
+          int main() {
+              return fmod_library_init(nullptr, nullptr, nullptr) + spine_godot_library_init(nullptr, nullptr, nullptr);
+          }
+          CPP
+          xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" .native-build/link-test.cpp native/ExtensionSupport.mm \
+            -F .native-build/ExtensionFrameworks -framework Sts2Fmod -framework Sts2Spine \
+            -Wl,-export_dynamic -o .native-build/link-test
+          xcrun lipo -verify_arch arm64 .native-build/link-test
+          xcrun otool -L .native-build/link-test

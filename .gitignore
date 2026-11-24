@@ -9,3 +9,5 @@
 *.mobileprovision
 payload/
 dist/
+.native-build/
+__pycache__/

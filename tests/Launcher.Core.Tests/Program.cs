@@ -50,7 +50,9 @@ try
     Assert(File.ReadAllBytes(pckPath).SequenceEqual(bytes),"Original pack unchanged");
     var extensionConfig="[configuration]\nentry_symbol = \"fmod_library_init\"\n[libraries]\nwindows.x86_64 = \"res://fmod.dll\"\nios.release = \"old.framework\"\n[dependencies]\nios = { \"old.a\": \"\" }\n";
     var rewritten=PckExtensions.RewriteDescriptor(extensionConfig,"fmod_library_init");
-    Assert(rewritten.Contains("ios.arm64 = \"res://native/fmod_library_init.a\"")&&!rewritten.Contains("old.framework")&&!rewritten.Contains("old.a")&&rewritten.Contains("windows.x86_64"),"iOS static extension descriptor");
+    Assert(rewritten.Contains("ios.arm64 = \"res://native/Sts2Fmod.framework\"")&&!rewritten.Contains("old.framework")&&!rewritten.Contains("old.a")&&rewritten.Contains("windows.x86_64"),"iOS FMOD framework descriptor");
+    var spine = PckExtensions.RewriteDescriptor(extensionConfig.Replace("fmod_library_init", "spine_godot_library_init"), "spine_godot_library_init");
+    Assert(spine.Contains("ios.arm64 = \"res://native/Sts2Spine.framework\""), "iOS Spine framework descriptor");
     Reject(()=>PckExtensions.RewriteDescriptor(extensionConfig,"wrong_symbol"));
     Assert(PckExtensions.RewriteDescriptor(rewritten,"fmod_library_init").Contains("ios.arm64"),"Extension patch repeatable");
     var receipt = store.Install(stage, 123, "public");

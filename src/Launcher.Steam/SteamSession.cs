@@ -180,8 +180,10 @@ public sealed class SteamSession : IAsyncDisposable
                     {
                         workerToken.ThrowIfCancellationRequested();
                         if (chunk.Offset != cursor || chunk.UncompressedLength == 0 || chunk.UncompressedLength > 64 * 1024 * 1024 || cursor > file.TotalSize || chunk.UncompressedLength > file.TotalSize - cursor) throw new InvalidDataException("Invalid chunk bounds or gap.");
+                        var hash = chunk.ChunkID;
+                        if (hash is not { Length: 20 }) throw new InvalidDataException("Missing or invalid Steam chunk hash.");
                         int length = checked((int)chunk.UncompressedLength);
-                        if (ChunkCache.Verify(stream, checked((long)cursor), length, chunk.ChunkID))
+                        if (ChunkCache.Verify(stream, checked((long)cursor), length, hash))
                         {
                             cursor += (uint)length; ReportBytes(length);
                             continue;
@@ -191,7 +193,7 @@ public sealed class SteamSession : IAsyncDisposable
                         var data = new byte[length];
                         var size = await FromCdn((s, t) => workerCdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t));
                         if (size != data.Length) throw new InvalidDataException("Unexpected chunk size.");
-                        if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), chunk.ChunkID))
+                        if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), hash))
                             throw new InvalidDataException("Downloaded chunk hash mismatch.");
                         await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size, true);
                     }

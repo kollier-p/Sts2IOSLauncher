@@ -1,29 +1,89 @@
 #!/usr/bin/env python3
-"""Validate the staged app without signing it or creating an IPA."""
-import pathlib,plistlib,subprocess,sys,json,hashlib
-app=pathlib.Path(sys.argv[1]).resolve()
-full="--extensions" in sys.argv
-info=plistlib.loads((app/"Info.plist").read_bytes())
-binary=app/info["CFBundleExecutable"]
-framework=app/"Frameworks/sts2.framework/sts2"
-required=[binary,framework,app/"Managed/Launcher.Host.dll",app/"Managed/Launcher.Core.dll",app/"Managed/Launcher.Steam.dll",app/"Managed/SteamKit2.dll",app/"Managed/System.Private.CoreLib.dll",app/"Managed/STS2JitSupport.dll",app/"Managed/Launcher.Adapters.dll"]
-for p in required:
-    if not p.is_file() or p.stat().st_size==0:raise SystemExit("Missing app component: "+str(p))
-for p in (binary,framework):
-    subprocess.run(["xcrun","lipo","-verify_arch","arm64",p],check=True)
-def symbols(p):
-    return subprocess.check_output(["xcrun","nm","-gU",p],text=True,errors="replace")
-main=symbols(binary);runtime=symbols(framework)
-for name in ("_sts2_extensions_available",):
-    if name not in main:raise SystemExit("Missing host symbol: "+name)
-for name in ("_sts2_host_delegate","_godotsharp_game_main_init","_sts2_initialize_game_runtime","_sts2_jit_patch","_sts2_vault_read","_sts2_vault_write","_sts2_vault_clear"):
-    if name not in runtime:raise SystemExit("Missing runtime symbol: "+name)
-if full:
-    for name in ("_fmod_library_init","_spine_godot_library_init"):
-        if name not in main:raise SystemExit("Missing native extension: "+name)
-for item in app.rglob("*"):
-    if item.name.lower() in {"sts2.dll","0harmony.dll","slaythespire2.pck","release_info.json","embedded.mobileprovision"}:raise SystemExit("Unexpected proprietary game or signing asset: "+str(item))
-    if item.is_symlink():raise SystemExit("Unexpected symlink: "+str(item))
-report={"bundle":info.get("CFBundleIdentifier"),"minimum_os":info.get("MinimumOSVersion"),"extensions":full,"required_components":len(required),"status":"compiled and staged; device untested"}
-pathlib.Path(".native-build/pre-ipa-report.json").write_text(json.dumps(report,indent=2))
-print(json.dumps(report,indent=2))
+"""Validate the staged iOS application without signing or packaging it."""
+
+import argparse
+import json
+import pathlib
+import plistlib
+import re
+import subprocess
+
+from integrate_extensions import FMOD_NAME, SPINE_NAME
+
+
+def inspect(*args):
+    return subprocess.check_output(["xcrun", *map(str, args)], text=True)
+
+
+def verify_device_binary(binary):
+    if inspect("lipo", "-archs", binary).strip() != "arm64":
+        raise SystemExit(f"Expected ARM64 only: {binary}")
+    build = inspect("vtool", "-show-build", binary)
+    if not re.search(r"^\s*platform\s+IOS\s*$", build, re.MULTILINE):
+        raise SystemExit(f"Expected iPhoneOS device binary: {binary}")
+    minimum = re.search(r"^\s*minos\s+(\d+)(?:\.(\d+))?", build, re.MULTILINE)
+    if not minimum or (int(minimum[1]), int(minimum[2] or 0)) > (16, 0):
+        raise SystemExit(f"{binary} exceeds the iOS 16.0 deployment target")
+
+
+def verify_symbols(binary, *names):
+    symbols = {line.split()[-1] for line in inspect("nm", "-gU", binary).splitlines() if line.split()}
+    missing = set(names) - symbols
+    if missing:
+        raise SystemExit(f"Missing symbols in {binary}: {', '.join(sorted(missing))}")
+
+
+def verify_framework(app, name, *symbols):
+    bundle = app / "Frameworks" / f"{name}.framework"
+    info = plistlib.loads((bundle / "Info.plist").read_bytes())
+    executable = bundle / name
+    if info["CFBundleExecutable"] != name or info["CFBundlePackageType"] != "FMWK":
+        raise SystemExit(f"Invalid framework bundle: {bundle}")
+    verify_device_binary(executable)
+    if inspect("otool", "-D", executable).splitlines()[-1] != f"@rpath/{name}.framework/{name}":
+        raise SystemExit(f"Unexpected install name: {executable}")
+    verify_symbols(executable, *symbols)
+
+
+def validate(app, extensions):
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    binary = app / info["CFBundleExecutable"]
+    if info.get("MinimumOSVersion") != "16.0" or info.get("godot_cmdline") != ["--main-pack", "user://StS2.pck"]:
+        raise SystemExit("Godot launch arguments or deployment target differ from the launcher contract")
+    verify_device_binary(binary)
+    verify_symbols(binary, "_sts2_extensions_available", "_OBJC_CLASS_$_LauncherGate")
+    verify_framework(app, "sts2", "_sts2_host_delegate", "_godotsharp_game_main_init",
+                     "_sts2_initialize_game_runtime", "_sts2_jit_patch", "_sts2_vault_read",
+                     "_sts2_vault_write", "_sts2_vault_clear")
+    for name in ("libSystem.Native.dylib", "libSystem.Globalization.Native.dylib",
+                 "libSystem.IO.Compression.Native.dylib", "libSystem.Net.Security.Native.dylib",
+                 "libSystem.Security.Cryptography.Native.Apple.dylib"):
+        verify_device_binary(app / "Frameworks" / name)
+    for name in ("Launcher.Host", "Launcher.Core", "Launcher.Steam", "Launcher.Adapters", "SteamKit2",
+                 "System.Private.CoreLib", "STS2JitSupport", "protobuf-net", "protobuf-net.Core"):
+        with (app / "Managed" / f"{name}.dll").open("rb") as assembly:
+            if assembly.read(2) != b"MZ":
+                raise SystemExit(f"Invalid managed assembly: {name}")
+    if extensions:
+        verify_symbols(binary, "_load_all_fmod_plugins")
+        verify_framework(app, FMOD_NAME, "_fmod_library_init", "_FMOD_System_Create", "_FMOD_Studio_System_Create")
+        verify_framework(app, SPINE_NAME, "_spine_godot_library_init")
+    for item in app.rglob("*"):
+        if item.name.lower() in {"sts2.dll", "0harmony.dll", "slaythespire2.pck", "release_info.json",
+                                 "embedded.mobileprovision"} or item.is_symlink():
+            raise SystemExit(f"Unexpected entry in pre-IPA app: {item}")
+    return {"bundle": info["CFBundleIdentifier"], "minimum_os": info["MinimumOSVersion"],
+            "extensions": extensions, "architecture": "arm64", "platform": "iPhoneOS",
+            "status": "compiled and staged; device untested"}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("app", type=pathlib.Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--extensions", action="store_true")
+    mode.add_argument("--diagnostic", action="store_true")
+    args = parser.parse_args()
+    result = json.dumps(validate(args.app, args.extensions), indent=2)
+    pathlib.Path(".native-build/pre-ipa-report.json").write_text(result + "\n")
+    print(result)

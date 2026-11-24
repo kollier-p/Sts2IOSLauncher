@@ -3,8 +3,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 namespace Launcher.Core;
 
-// Repoint the two shipped extension descriptors to statically linked iOS
-// symbols. Modify only the launch copy; unknown extension versions fail closed.
+// Use the native extensions supplied by the launcher in the copy sent to Godot.
 public static class PckExtensions
 {
     static readonly Dictionary<string,string> Symbols=new(StringComparer.Ordinal){
@@ -13,6 +12,12 @@ public static class PckExtensions
     };
     public static string RewriteDescriptor(string text,string symbol)
     {
+        var library = symbol switch
+        {
+            "fmod_library_init" => "res://native/Sts2Fmod.framework",
+            "spine_godot_library_init" => "res://native/Sts2Spine.framework",
+            _ => throw new InvalidDataException("Unsupported extension entry symbol: " + symbol)
+        };
         if(!Regex.IsMatch(text,@"(?m)^\s*entry_symbol\s*=\s*"""+Regex.Escape(symbol)+@"""\s*$"))
             throw new InvalidDataException("Unexpected extension entry symbol: "+symbol);
         var sections=Regex.Split(text,@"(?m)(^\s*\[[^\r\n]+\]\s*$)");
@@ -25,7 +30,7 @@ public static class PckExtensions
                 libraries=true;
                 // Only iOS needs rewriting. No downloaded native binary is loaded.
                 sections[i+1]=Regex.Replace(sections[i+1],@"(?mi)^\s*ios(?:\.[a-z0-9_]+)*\s*=.*(?:\r?\n|$)","");
-                sections[i+1]="\nios.arm64 = \"res://native/"+symbol+".a\"\n"+sections[i+1];
+                sections[i+1]="\nios.arm64 = \""+library+"\"\n"+sections[i+1];
             }
             if(name=="[dependencies]"){
                 // All iOS dependencies are linked at build time, not extracted from game files.

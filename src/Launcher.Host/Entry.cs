@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
@@ -27,6 +28,7 @@ public static class Entry
     sealed record Request(string Username,string Password,string Branch,string? Manifest,string? BetaPassword,bool Remember=false,bool Saved=false);
     static void Publish(State next) { lock(Sync) state=next; HostDiagnostics.Stage(next.Stage); }
     static string Str(nint p) => Marshal.PtrToStringUTF8(p) ?? "";
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Initialize(nint payloadRoot,nint docs,nint bundled)
     {
         try {
@@ -50,12 +52,14 @@ public static class Entry
         }
         return null;
     }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int CopyStatus(nint buffer,int capacity)
     {
         byte[] json; lock(Sync) json=JsonSerializer.SerializeToUtf8Bytes(state);
         if(buffer==0 || capacity<=json.Length) return -json.Length-1;
         Marshal.Copy(json,0,buffer,json.Length); Marshal.WriteByte(buffer,json.Length,0); return json.Length;
     }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BeginDownload(nint input)
     {
         try {
@@ -110,31 +114,45 @@ public static class Entry
         try{return await tcs.Task.WaitAsync(ct);}
         finally{lock(Sync){if(prompt==tcs)prompt=null;}}
     }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Reply(nint input) { lock(Sync) return prompt?.TrySetResult(Str(input))==true?0:-1; }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int ForgetSession(){ lock(Sync){if(active is not null)return -1;try{return SteamVault.Clear();}catch{return -2;}} }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Cancel() { lock(Sync){active?.Cancel();return 0;} }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Prepare()
     {
         CancellationTokenSource cts;
         lock(Sync){if(active is not null||store is null)return -1;active=cts=new();}
         _=Task.Run(()=>{
             try {
-                if(NativeExtensionsAvailable()!=1){Publish(new("error","This diagnostic IPA does not include the native game extensions. Install an extension-enabled build to play."));return;}
+                if(NativeExtensionsAvailable()!=1){Publish(new("error","Play requires an extension-enabled launcher build."));return;}
                 Publish(new("verify","Verifying installation"));
                 var plan=LaunchPlan.Prepare(store!,documents,cts.Token);
                 // Keep the verified immutable payload unchanged. Godot uses a stable user:// pack.
                 var adapter=Path.Combine(Path.GetDirectoryName(store!.Root)!,"RuntimeAdapters",plan.Receipt.PayloadId);
                 Directory.CreateDirectory(adapter);
                 var harmony=Path.Combine(plan.Assemblies,"0Harmony.dll");
-                if(File.Exists(harmony)) Launcher.Adapters.Rewriter.Prepare("harmony",harmony,Path.Combine(managed,"STS2JitSupport.dll"),Path.Combine(adapter,"0Harmony.dll"));
-                assemblyRoot=plan.Assemblies;adapterRoot=adapter;
-                // Load by name before Godot asks the runtime for its delegate.
-                loadedGame=AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
-                releaseInfo=Path.Combine(Path.GetDirectoryName(plan.Pack)!,"release_info.json");
+                if(!File.Exists(harmony)) throw new FileNotFoundException("The verified game payload is missing Harmony.", harmony);
+                Launcher.Adapters.Rewriter.Prepare("harmony",harmony,Path.Combine(managed,"STS2JitSupport.dll"),Path.Combine(adapter,"0Harmony.dll"));
                 var link=Path.Combine(documents,"StS2.pck");
                 var temporary=link+"."+Guid.NewGuid().ToString("N")+".tmp";
-                try { if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary); PckScripts.Add(temporary,plan.GameAssembly,cts.Token); PckExtensions.Patch(temporary,cts.Token); File.Move(temporary,link,true); }
+                try {
+                    if(NativeClone(plan.Pack,temporary,0)!=0) File.Copy(plan.Pack,temporary);
+                    PckScripts.Add(temporary,plan.GameAssembly,cts.Token);
+                    PckExtensions.Patch(temporary,cts.Token);
+                    cts.Token.ThrowIfCancellationRequested();
+                    File.Move(temporary,link,true);
+                }
                 finally {if(File.Exists(temporary))File.Delete(temporary);}
+                // Commit to this payload only once the pack can be handed to Godot.
+                assemblyRoot=plan.Assemblies;adapterRoot=adapter;
+                loadedGame=AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
+                releaseInfo=Path.Combine(Path.GetDirectoryName(plan.Pack)!,"release_info.json");
                 Publish(new("ready","Game verified. Starting Godot."));
             } catch(OperationCanceledException){Publish(new("idle","Launch cancelled"));}
               catch(Exception e){HostDiagnostics.Error("prepare",e);Publish(new("error",$"Launch preparation failed ({e.GetType().Name})."));}
@@ -146,9 +164,10 @@ public static class Entry
     static extern int NativeExtensionsAvailable();
     [DllImport("libSystem.B.dylib",EntryPoint="clonefile",SetLastError=true)]
     static extern int NativeClone([MarshalAs(UnmanagedType.LPUTF8Str)] string source,[MarshalAs(UnmanagedType.LPUTF8Str)] string target,int flags);
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int StartGameHooks() {
         try { GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),documents,releaseInfo ?? throw new InvalidOperationException()); return 0; }
-        catch(Exception e) { Console.Error.WriteLine("[iOS] Game compatibility startup: "+e); return -1; }
+        catch(Exception e) { HostDiagnostics.Error("game compatibility startup",e); return -1; }
     }
     sealed class DirectProgress<T>(Action<T> report):IProgress<T>{public void Report(T value)=>report(value);}
     sealed class Guard(CancellationToken ct):IAuthenticator
