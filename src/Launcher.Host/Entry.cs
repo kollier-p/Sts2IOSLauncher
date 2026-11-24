@@ -424,6 +424,53 @@ public static class Entry
             return new("idle", upload ? $"Uploaded {result.Transferred} save files." : $"Downloaded {result.Transferred} save files.");
         }) ? 0 : -1;
 
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseSteamCloud() => Start("Steam Cloud", new("cloud", "Opening Steam Cloud…"),
+        async (payloads, ct) =>
+        {
+            var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
+            var action = await Ask("steam-cloud", "Steam Cloud", ct,
+                [new("pull", "Download saves", "Back up and apply remote changes"),
+                 new("push", "Upload saves", "Send local save changes to Steam")]);
+            if (action is not ("pull" or "push")) throw new InvalidDataException("Invalid Steam Cloud action.");
+            var settings = await Ask("steam-cloud-settings", "Include game settings in sync?", ct,
+                [new("no", "Saves only", "Keep device settings local"), new("yes", "Include settings", "Sync settings.save along with saves")]);
+            var saved = SteamVault.Load();
+            var user = saved is null ? (await Ask("steam-user", "Enter your Steam account name", ct)).Trim() : saved.AccountName;
+            var password = saved is null ? await Ask("steam-password", "Enter your Steam password", ct) : "";
+            if (user.Length == 0 || (saved is null && password.Length == 0)) return new("error", "Enter your Steam account name and password.");
+            Publish(new("auth", "Connecting to Steam Cloud…"));
+            await using var session = new SteamSession();
+            if (saved is null) await session.AuthenticateAsync(user, password, new Guard(ct), null, false, ct);
+            else await session.LogOnAsync(saved, true, ct);
+
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
+            var cloud = session.OpenCloud(http);
+            var profileKey = profile.IsolateSaves ? profile.Id : "shared";
+            var support = Path.GetDirectoryName(payloads.Root)!;
+            var saveDirectory = profiles!.SnapshotSaveDirectory(profile);
+            var snapshots = Payload.SafePath(support, $"SaveSnapshots/{profileKey}");
+            var history = Payload.SafePath(support, "SteamCloudBaselines");
+            var upload = action == "push";
+            Publish(new("cloud", "Comparing local and Steam Cloud saves…"));
+            SaveSyncResult result;
+            try
+            {
+                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, false, ct);
+            }
+            catch (SaveSyncConflictException conflict)
+            {
+                var resolution = await Ask("steam-cloud-conflict", $"{conflict.Count} save files conflict", ct,
+                    [new("cancel", "Keep both copies", "Return without syncing"),
+                     new("replace", upload ? "Use iPad saves" : "Use Steam Cloud saves",
+                         upload ? "Replace conflicting files in Steam Cloud" : "Back up local saves before replacing them")]);
+                if (resolution != "replace") return new("idle", "Steam Cloud changes kept on both sides.");
+                Publish(new("cloud", "Applying the selected Steam Cloud changes…"));
+                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, true, ct);
+            }
+            return new("idle", upload ? $"Uploaded {result.Transferred} save files to Steam Cloud." : $"Downloaded {result.Transferred} Steam Cloud save files.");
+        }) ? 0 : -1;
+
     static bool Start(string operation, State pending, Func<PayloadStore, CancellationToken, Task<State>> run)
     {
         CancellationTokenSource cts;

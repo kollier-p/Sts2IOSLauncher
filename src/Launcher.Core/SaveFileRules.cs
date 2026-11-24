@@ -33,6 +33,25 @@ public static class SaveFileRules
             (parts.Length == offset + 2 || parts[offset + 2].Equals("history", StringComparison.OrdinalIgnoreCase)));
     }
 
+    public static IEnumerable<(string Relative, string File)> Enumerate(string root, bool includeSettings, CancellationToken ct)
+    {
+        if (!Directory.Exists(root)) yield break;
+        var folders = new Stack<string>();
+        folders.Push("");
+        while (folders.TryPop(out var folder))
+        {
+            var directory = folder.Length == 0 ? root : Payload.SafePath(root, folder);
+            foreach (var file in Directory.EnumerateFileSystemEntries(directory))
+            {
+                ct.ThrowIfCancellationRequested();
+                var name = Path.GetFileName(file);
+                var relative = folder.Length == 0 ? name : folder + "/" + name;
+                if (Visit(relative) && Directory.Exists(file)) folders.Push(relative);
+                else if (Include(relative, includeSettings) && File.Exists(file)) yield return (relative, Payload.SafePath(root, relative));
+            }
+        }
+    }
+
     static bool IsSlot(string value) => value.Length == 8 && value.StartsWith("profile", StringComparison.OrdinalIgnoreCase) && value[^1] is >= '1' and <= '3';
     static bool UnsafePart(string part) => part is "" or "." or ".." || part.Contains('\\') || part.Contains(':') || part.Any(char.IsControl);
 }

@@ -219,5 +219,13 @@ public sealed class SteamSession : IAsyncDisposable
         finally { if (processing && Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
     void RequireSession() { if (!authenticated) throw new InvalidOperationException("Steam login required."); }
+
+    public SteamCloudSaves OpenCloud(HttpClient http)
+    {
+        RequireSession();
+        var account = client.SteamID?.ConvertToUInt64() ?? throw new InvalidOperationException("Steam account is unavailable.");
+        var cloud = client.GetHandler<SteamUnifiedMessages>()!.CreateService<SteamKit2.Internal.Cloud>();
+        return new SteamCloudSaves(cloud, http, account, client.CellID ?? 0);
+    }
     public async ValueTask DisposeAsync() { stop.Cancel(); client.Disconnect(); await pump; stop.Dispose(); }
 }

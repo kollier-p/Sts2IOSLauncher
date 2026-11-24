@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -24,13 +23,6 @@ public sealed record WebDavSettings(string Endpoint, string User, string Passwor
 
     public override string ToString() => "WebDAV settings [redacted]";
 }
-
-public sealed class SaveSyncConflictException(int count) : IOException("The local and remote saves both changed.")
-{
-    public int Count { get; } = count;
-}
-
-public sealed record SaveSyncResult(int Transferred, int Compared);
 
 public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
 {
@@ -56,17 +48,7 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
     {
         ct.ThrowIfCancellationRequested();
         localRoot = Path.GetFullPath(localRoot);
-        Directory.CreateDirectory(baselineRoot);
-        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{endpoint}\n{settings.User}\n{slot}\n{profileKey}")));
-        var baselineFile = Payload.SafePath(baselineRoot, key + ".json");
-        var baseline = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (File.Exists(baselineFile))
-        {
-            using var stream = File.OpenRead(baselineFile);
-            var previous = await JsonSerializer.DeserializeAsync<Dictionary<string, string>>(stream, cancellationToken: ct);
-            if (previous is not null) baseline = new(previous, StringComparer.OrdinalIgnoreCase);
-        }
-
+        var history = new SaveSyncHistory(baselineRoot, $"{endpoint}\n{settings.User}\n{slot}\n{profileKey}");
         var scratch = Directory.CreateTempSubdirectory("sts2-webdav-").FullName;
         try
         {
@@ -74,18 +56,8 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
             var remote = await ReadRemote(scratch, ct);
             var source = upload ? local : remote;
             var destination = upload ? remote : local;
-            var changes = new List<SaveFile>();
-            var conflicts = 0;
-            foreach (var file in source.Values)
-            {
-                if (!destination.TryGetValue(file.Relative, out var other)) { changes.Add(file); continue; }
-                if (file.Hash == other.Hash) { baseline[file.Relative] = file.Hash; continue; }
-                if (overwriteConflicts || (baseline.TryGetValue(file.Relative, out var agreed) && other.Hash == agreed))
-                    changes.Add(file);
-                else if (!baseline.TryGetValue(file.Relative, out agreed) || file.Hash != agreed)
-                    conflicts++;
-            }
-            if (conflicts != 0) throw new SaveSyncConflictException(conflicts);
+            var changes = history.Changes(Hashes(source), Hashes(destination), overwriteConflicts)
+                .Select(name => source[name]).ToArray();
 
             if (upload)
             {
@@ -104,7 +76,7 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
                     else if (previous.Modified is not null) request.Headers.IfUnmodifiedSince = previous.Modified;
                     using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
                     response.EnsureSuccessStatusCode();
-                    baseline[file.Relative] = file.Hash;
+                    history.Remember(file.Relative, file.Hash);
                 }
             }
             else
@@ -112,10 +84,10 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
                 var files = changes.ToDictionary(file => local.TryGetValue(file.Relative, out var item) ? item.Relative : file.Relative,
                     file => file.File, StringComparer.Ordinal);
                 new SaveSnapshots(localRoot, snapshotRoot).ApplyDownloadedFiles(files, ct);
-                foreach (var file in changes) baseline[file.Relative] = file.Hash;
+                foreach (var file in changes) history.Remember(file.Relative, file.Hash);
             }
-            WriteBaseline(baselineFile, baseline);
-            return new(changes.Count, source.Count);
+            history.Save();
+            return new(changes.Length, source.Count);
         }
         finally { Directory.Delete(scratch, recursive: true); }
     }
@@ -123,27 +95,8 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
     async Task<Dictionary<string, SaveFile>> ReadLocal(string root, CancellationToken ct)
     {
         var result = new Dictionary<string, SaveFile>(StringComparer.OrdinalIgnoreCase);
-        if (!Directory.Exists(root)) return result;
-        var folders = new Stack<string>();
-        folders.Push("");
-        while (folders.TryPop(out var folder))
-        {
-            foreach (var path in Directory.EnumerateFileSystemEntries(folder.Length == 0 ? root : Payload.SafePath(root, folder)))
-            {
-                ct.ThrowIfCancellationRequested();
-                var relative = Join(folder, Path.GetFileName(path));
-                if (SaveFileRules.Visit(relative) && Directory.Exists(path))
-                {
-                    Payload.SafePath(root, relative);
-                    folders.Push(relative);
-                }
-                else if (SaveFileRules.Include(relative, settings.IncludeSettings) && File.Exists(path))
-                {
-                    var file = Payload.SafePath(root, relative);
-                    result.Add(relative, new(relative, file, await Hash(file, ct)));
-                }
-            }
-        }
+        foreach (var (relative, file) in SaveFileRules.Enumerate(root, settings.IncludeSettings, ct))
+            result.Add(relative, new(relative, file, await Hash(file, ct)));
         return result;
     }
 
@@ -241,18 +194,6 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, ct));
     }
 
-    static void WriteBaseline(string path, Dictionary<string, string> baseline)
-    {
-        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            using (var stream = new FileStream(temporary, FileMode.CreateNew))
-            {
-                JsonSerializer.Serialize(stream, baseline);
-                stream.Flush(true);
-            }
-            File.Move(temporary, path, overwrite: true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
-    }
+    static Dictionary<string, string> Hashes(Dictionary<string, SaveFile> files)
+        => files.ToDictionary(pair => pair.Key, pair => pair.Value.Hash, StringComparer.OrdinalIgnoreCase);
 }

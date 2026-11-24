@@ -20,7 +20,7 @@ static BOOL started = NO;
 static InitHost initHost;
 static Command beginDownload, beginImport;
 static Reply reply;
-static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -61,7 +61,7 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
@@ -142,6 +142,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
     self.snapshots=[self button:@"Save snapshots" action:@selector(snapshotsPressed)];
     self.webDav=[self button:@"WebDAV save sync" action:@selector(webDavPressed)];
+    self.steamCloud=[self button:@"Steam Cloud saves" action:@selector(steamCloudPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
@@ -156,7 +157,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
-    UIStackView *savesSection=[self section:@[self.snapshots,self.webDav]];
+    UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
     self.sections=@[playSection,installSection,savesSection];
     UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
@@ -167,7 +168,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSLayoutConstraint *preferredWidth=[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48];
     preferredWidth.priority=UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=NO;
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -194,6 +195,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("BrowseProfiles",(void**)&browseProfiles)==0 &&
                get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
                get("BrowseWebDav",(void**)&browseWebDav)==0 &&
+               get("BrowseSteamCloud",(void**)&browseSteamCloud)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -225,7 +227,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
     self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.play.enabled=idle && installed!=nil && profile!=nil;
-    self.snapshots.enabled=self.webDav.enabled=idle && profile!=nil;
+    self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -289,7 +291,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Enter code" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(@"code");}]];
     }else{
         [alert addTextFieldWithConfigurationHandler:^(UITextField *field){
-            field.secureTextEntry=[kind isEqual:@"password"] || [kind isEqual:@"webdav-password"];
+            field.secureTextEntry=[kind isEqual:@"password"] || [kind isEqual:@"webdav-password"] || [kind isEqual:@"steam-password"];
             field.autocapitalizationType=UITextAutocapitalizationTypeNone;
             field.autocorrectionType=UITextAutocorrectionTypeNo;
             if([kind isEqual:@"webdav-url"]) field.keyboardType=UIKeyboardTypeURL;
@@ -310,6 +312,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)profilesPressed { [self.view endEditing:YES];if(browseProfiles()!=0)[self showError:@"Another operation is active."]; }
 - (void)snapshotsPressed { [self.view endEditing:YES];if(browseSnapshots()!=0)[self showError:@"Another operation is active."]; }
 - (void)webDavPressed { [self.view endEditing:YES];if(browseWebDav()!=0)[self showError:@"Another operation is active."]; }
+- (void)steamCloudPressed { [self.view endEditing:YES];if(browseSteamCloud()!=0)[self showError:@"Another operation is active."]; }
 - (void)importPressed {
     [self.view endEditing:YES];
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
