@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'native/mono/**'
+      - 'native/**'
       - 'scripts/build_native_mono.py'
       - '.github/workflows/native-mono-patched.yml'
 permissions:
@@ -21,10 +21,16 @@ jobs:
         run: |
           xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc -c native/mono/MonoJitMemory.mm -o .native-build/mono-patched/MonoJitMemory.o
           xcrun lipo -verify_arch arm64 .native-build/mono-patched/MonoJitMemory.o
+      - name: Link independent game runtime framework binary
+        run: |
+          mkdir -p .native-build/framework
+          xcrun --sdk iphoneos clang++ -dynamiclib -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc native/GameRuntime.mm native/JitProbe.mm .native-build/mono-patched/MonoJitMemory.o $(for f in .native-build/mono-patched/mono/mini/libmonosgen-2.0.a .native-build/mono-patched/mono/mini/libmono-component-*-static.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework Security -lz -liconv -Wl,-install_name,@rpath/sts2.framework/sts2 -o .native-build/framework/sts2
+          xcrun lipo -verify_arch arm64 .native-build/framework/sts2
       - uses: actions/upload-artifact@v4
         with:
           name: patched-mono-arm64
           path: |
             .native-build/mono-patched/mono/mini/*.a
             .native-build/mono-patched/MonoJitMemory.o
+            .native-build/framework/sts2
           if-no-files-found: error
