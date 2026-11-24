@@ -43,6 +43,18 @@ try
     var malformed = store.NewStaging(); Fixture(malformed); var malformedPck = Path.Combine(malformed, Payload.Required[0]);
     using (var f = File.OpenWrite(malformedPck)) { f.Position = 32; f.Write(BitConverter.GetBytes(ulong.MaxValue)); }
     Reject(() => PckPatcher.Patch(malformedPck));
-    Console.WriteLine("All payload fixture assertions passed.");
+    var cached = Path.Combine(root, "cache-test");
+    File.WriteAllBytes(cached, new byte[] { 1, 2, 3 });
+    var expected = SHA1.HashData(new byte[] { 1, 2, 3 });
+    Assert(DownloadCache.IsVerified(cached, 3, expected), "Valid cached file");
+    Assert(!DownloadCache.IsVerified(cached, 4, expected), "Wrong cached length");
+    File.WriteAllBytes(cached, new byte[] { 1, 2, 4 });
+    Assert(!DownloadCache.IsVerified(cached, 3, expected), "Corrupted cached file");
+    Assert(!DownloadCache.IsVerified(cached + ".missing", 3, expected), "Missing cached file");
+    var estimate = TransferEstimate.Calculate(100, 300, 700, TimeSpan.FromSeconds(2));
+    Assert(estimate.BytesPerSecond == 100 && estimate.Remaining == TimeSpan.FromSeconds(4), "Transfer estimate excludes cached bytes");
+    Assert(TransferEstimate.Calculate(100, 100, 700, TimeSpan.FromSeconds(2)).Remaining is null, "No speed no ETA");
+    Assert(TransferEstimate.Calculate(100, 700, 700, TimeSpan.FromSeconds(2)).Remaining == TimeSpan.Zero, "Finished ETA");
+    Console.WriteLine("All payload and download fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

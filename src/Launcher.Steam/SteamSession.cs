@@ -121,11 +121,7 @@ public sealed class SteamSession : IAsyncDisposable
                 // Reuse only complete files whose length and Steam manifest hash match.
                 if (File.Exists(output))
                 {
-                    bool valid;
-                    using (var existing = File.OpenRead(output))
-                        valid = existing.Length == checked((long)file.TotalSize) &&
-                            CryptographicOperations.FixedTimeEquals(SHA1.HashData(existing), file.FileHash);
-                    if (valid)
+                    if (DownloadCache.IsVerified(output, checked((long)file.TotalSize), file.FileHash))
                     {
                         done += checked((long)file.TotalSize);
                         progress?.Report(new("download", done, total));
