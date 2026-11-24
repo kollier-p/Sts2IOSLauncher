@@ -115,33 +115,37 @@ public sealed class SteamSession : IAsyncDisposable
         if (servers.Length == 0) throw new IOException("No suitable Steam CDN servers.");
         using var cdn = new SteamKit2.CDN.Client(client);
         var authTokens = new System.Collections.Concurrent.ConcurrentDictionary<string, SteamContent.CDNAuthToken>();
-        async Task<T> FromCdn<T>(Func<SteamKit2.CDN.Server, string?, Task<T>> action)
+        async Task<T> FromCdn<T>(Func<SteamKit2.CDN.Server, string?, Task<T>> action, CancellationToken token)
         {
             Exception? last = null;
             foreach (var server in servers)
             {
-                ct.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
                 try
                 {
                     authTokens.TryGetValue(server.Host!, out var cached);
                     if (cached is not null && cached.Expiration <= DateTime.UtcNow) cached = null;
-                    try { return await action(server, cached?.Token); }
+                    try { var value = await action(server, cached?.Token); token.ThrowIfCancellationRequested(); return value; }
                     catch (SteamKitWebRequestException e) when (e.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
                     {
                         var auth = await Content.GetCDNAuthToken(Payload.AppId, Payload.WindowsDepot, server.Host!);
                         if (auth.Result != EResult.OK || string.IsNullOrEmpty(auth.Token)) throw new UnauthorizedAccessException("Steam CDN authorization rejected.");
-                        authTokens[server.Host!] = auth; return await action(server, auth.Token);
+                        token.ThrowIfCancellationRequested();
+                        authTokens[server.Host!] = auth;
+                        var value = await action(server, auth.Token); token.ThrowIfCancellationRequested(); return value;
                     }
                 }
-                catch (Exception e) when (e is HttpRequestException or IOException or TimeoutException or UnauthorizedAccessException) { last = e; }
+                catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or TimeoutException or UnauthorizedAccessException) { last = e; }
             }
             throw new IOException("All selected Steam CDN servers failed.", last);
         }
-        var manifest = await FromCdn((s, t) => cdn.DownloadManifestAsync(Payload.WindowsDepot, manifestId, code, s, key.DepotKey, cdnAuthToken: t));
+        var manifest = await FromCdn((s, t) => cdn.DownloadManifestAsync(Payload.WindowsDepot, manifestId, code, s, key.DepotKey, cdnAuthToken: t), ct);
         if (manifest.ManifestGID != manifestId || manifest.DepotID != Payload.WindowsDepot || manifest.FilenamesEncrypted || manifest.Files is null) throw new InvalidDataException("Unexpected or encrypted manifest.");
         var selected = manifest.Files.Where(f => !f.Flags.HasFlag(EDepotFileFlag.Directory)).Select(f => (File: f, Path: Payload.Normalize(f.FileName))).Where(x => Payload.Include(x.Path)).ToArray();
         if (selected.Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != selected.Length || !Payload.Required.All(p => selected.Any(x => x.Path == p))) throw new InvalidDataException("Duplicate or missing manifest payload files.");
         foreach (var x in selected) if (!string.IsNullOrEmpty(x.File.LinkTarget) || x.File.Flags.HasFlag(EDepotFileFlag.Symlink)) throw new InvalidDataException("Symlink entries unsupported.");
+        foreach (var x in selected)
+            ChunkLayout.Validate(x.File.TotalSize, x.File.FileHash, x.File.Chunks.Select(c => new ChunkExtent(c.Offset, c.UncompressedLength, c.ChunkID)));
         long total = selected.Sum(x => checked((long)x.File.TotalSize)), done = 0;
         // Serialize installers across sessions; the OS releases this lock on process exit.
         using var installLock = store.AcquireWriteLock();
@@ -190,10 +194,12 @@ public sealed class SteamSession : IAsyncDisposable
                         stream.SetLength(checked((long)cursor));
                         stream.Position = checked((long)cursor);
                         var data = new byte[length];
-                        var size = await FromCdn((s, t) => workerCdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t));
-                        if (size != data.Length) throw new InvalidDataException("Unexpected chunk size.");
-                        if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), hash))
-                            throw new InvalidDataException("Downloaded chunk hash mismatch.");
+                        var size = await FromCdn(async (s, t) =>
+                        {
+                            var count = await workerCdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t);
+                            ChunkLayout.VerifyDownloaded(data, count, hash);
+                            return count;
+                        }, workerToken);
                         await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size, true);
                     }
                     if (cursor != file.TotalSize) throw new InvalidDataException("File length mismatch.");

@@ -60,3 +60,31 @@ public sealed class TransferMeter(long total)
         return (completed, TransferEstimate.Calculate(completed - network, completed, total, elapsed));
     }
 }
+
+public readonly record struct ChunkExtent(ulong Offset, uint Length, byte[] Hash);
+
+public static class ChunkLayout
+{
+    // Validate the entire manifest before accepting even a fully cached file.
+    public static void Validate(ulong size, byte[] fileHash, IEnumerable<ChunkExtent> chunks)
+    {
+        if (size > long.MaxValue || fileHash is not { Length: 20 })
+            throw new InvalidDataException("Invalid manifest file size or hash.");
+        ulong cursor = 0;
+        foreach (var chunk in chunks.OrderBy(c => c.Offset))
+        {
+            if (chunk.Offset != cursor || chunk.Length == 0 || chunk.Length > 64 * 1024 * 1024 ||
+                cursor > size || chunk.Length > size - cursor || chunk.Hash is not { Length: 20 })
+                throw new InvalidDataException("Invalid manifest chunk layout.");
+            cursor += chunk.Length;
+        }
+        if (cursor != size) throw new InvalidDataException("Manifest chunks do not cover the file.");
+    }
+
+    public static void VerifyDownloaded(byte[] data, int count, byte[] hash)
+    {
+        if (count != data.Length || hash is not { Length: 20 } ||
+            !CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), hash))
+            throw new InvalidDataException("Downloaded chunk size or hash mismatch.");
+    }
+}

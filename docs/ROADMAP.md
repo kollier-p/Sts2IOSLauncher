@@ -12,3 +12,5 @@ Target device is a JIT-enabled 11-inch iPad Pro running iPadOS 17.6.3. Feature c
 | Launcher utilities | Persistent launcher diagnostics are implemented. Mod management, Workshop, Nexus, Steam Cloud, WebDAV, save snapshots, file browser, localization, and settings remain open. |
 
 The current build gate is ARM64 compilation, linking, and pre-IPA staging in CI. Steam sign-in, installation and gameplay on a physical iPad are separate verification gates.
+
+Download hardening: validate full chunk layouts before cache reuse, retry corrupt CDN chunks on alternate servers, and honor worker cancellation between CDN attempts. Offline fixture coverage added; live CDN behavior remains unverified. Remaining storage work includes free-space preflight and cleanup of inactive versions.
