@@ -25,8 +25,9 @@ public static class PayloadIntegrity
             }
         }
     }
-    static string Hash(string path, CancellationToken ct)
+    internal static string Hash(string path, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         using var input = File.OpenRead(path);
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[1024 * 1024];
@@ -36,6 +37,7 @@ public static class PayloadIntegrity
             ct.ThrowIfCancellationRequested();
             digest.AppendData(buffer, 0, count);
         }
+        ct.ThrowIfCancellationRequested();
         return Convert.ToHexString(digest.GetHashAndReset());
     }
     public static string Create(string root, CancellationToken ct)

@@ -287,6 +287,9 @@ try
     Assert(liveSample.Completed == 600 && liveSample.Estimate.BytesPerSecond == 100 && liveSample.Estimate.Remaining == TimeSpan.FromSeconds(4), "Mixed cached and live transfer ETA");
     Reject(() => meter.Add(401, true, TimeSpan.FromSeconds(3)));
     Assert(store.VerifyForLaunch().Receipt == receipt, "Verified launch payload");
+    Reject(() => store.ActivateVersion(receipt.PayloadId, new CancellationToken(true)));
+    Reject(() => store.VerifyForLaunch(new CancellationToken(true)));
+    Assert(store.Current() == receipt, "Cancelled verification preserves active installation");
     var launchData = root + "-saves";
     try
     {

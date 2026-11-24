@@ -74,8 +74,7 @@ public sealed class PayloadStore(string root)
         ct.ThrowIfCancellationRequested(); Payload.Validate(staging);
         var patched = PckPatcher.Patch(Payload.SafePath(staging, Payload.Required[0]));
         Payload.Validate(staging);
-        using var file = File.OpenRead(Payload.SafePath(staging, Payload.Required[0]));
-        var hash = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant(); file.Dispose();
+        var hash = PayloadIntegrity.Hash(Payload.SafePath(staging, Payload.Required[0]), ct).ToLowerInvariant();
         var id = $"{manifestId}-{Guid.NewGuid():N}";
         var receipt = new InstallReceipt(Payload.AppId, depotId, manifestId, source, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct));
         File.WriteAllText(Path.Combine(staging, ".payload_manifest.json"), JsonSerializer.Serialize(receipt));
@@ -115,9 +114,8 @@ public sealed class PayloadStore(string root)
             ?? throw new InvalidDataException("Installed version not found.");
         var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
         Payload.Validate(directory);
-        using (var stream = File.OpenRead(Payload.SafePath(directory, Payload.Required[0])))
-            if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Installed PCK checksum mismatch.");
+        if (!string.Equals(PayloadIntegrity.Hash(Payload.SafePath(directory, Payload.Required[0]), ct), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Installed PCK checksum mismatch.");
         if (receipt.InventorySha256 is not null) PayloadIntegrity.Verify(directory, receipt.InventorySha256, ct);
         var temp = Path.Combine(Root, "current-" + Guid.NewGuid().ToString("N") + ".tmp");
         try

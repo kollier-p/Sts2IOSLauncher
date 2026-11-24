@@ -18,4 +18,6 @@ Download checks validate full chunk layouts before cache reuse, retry corrupt ch
 
 Inactive installations with intact receipts remain selectable for removal even when required game files are missing; activation still validates required files and inventory before switching. This permits storage recovery without deleting the active installation. Regression coverage passed on revision 79c095c.
 
-Launch preparation uses a cancellable buffered copy when filesystem cloning is unavailable. The original verified pack remains untouched, and the host removes the disposable staging file on failure. Offline copy fixtures are pending CI; actual iPad filesystem behavior remains unverified.
+Launch preparation uses a cancellable buffered copy when filesystem cloning is unavailable. The original verified pack remains untouched, and the host removes the disposable staging file on failure. Offline copy fixtures passed on revision 0dd26c3; actual iPad filesystem behavior remains unverified.
+
+Installation and version activation now use the same cancellation-aware streaming SHA-256 implementation as inventory verification, rather than an uninterrupted full-pack hash. Cancellation regression checks are pending CI.
