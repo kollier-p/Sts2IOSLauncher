@@ -63,6 +63,7 @@ sealed class SetupController(SceneDelegate app) : UIViewController
     readonly UILabel status = new() { Lines = 0, TextColor = UIColor.White };
     readonly UITextField username = Field("Steam account name"), password = Field("Steam password", true), branch = Field("Branch (public)"), manifest = Field("Exact Manifest ID (optional)"), betaPassword = Field("Beta branch password (optional)", true);
     readonly UIButton start = UIButton.FromType(UIButtonType.System), cancel = UIButton.FromType(UIButtonType.System), saved = UIButton.FromType(UIButtonType.System), logout = UIButton.FromType(UIButtonType.System);
+    readonly UIButton play = UIButton.FromType(UIButtonType.System);
     readonly UISwitch remember = new();
     readonly UIProgressView progress = new(UIProgressViewStyle.Default);
     CancellationTokenSource? active;
@@ -76,7 +77,9 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         start.SetTitle("Sign in & download", UIControlState.Normal); saved.SetTitle("Use saved Steam session", UIControlState.Normal); cancel.SetTitle("Cancel", UIControlState.Normal); logout.SetTitle("Forget Steam session", UIControlState.Normal);
         var rememberLabel = new UILabel { Text = "Remember Steam session", TextColor = UIColor.White };
         var toggle = new UIStackView(new UIView[] { rememberLabel, remember }) { Axis = UILayoutConstraintAxis.Horizontal, Distribution = UIStackViewDistribution.EqualSpacing };
-        var stack = new UIStackView(new UIView[] { heading, sub, username, password, branch, betaPassword, manifest, toggle, start, saved, logout, progress, status, cancel }) { Axis = UILayoutConstraintAxis.Vertical, Spacing = 16, TranslatesAutoresizingMaskIntoConstraints = false };
+        play.SetTitle("Prepare game launch", UIControlState.Normal);
+        play.TouchUpInside += async (_, _) => await PrepareGame();
+        var stack = new UIStackView(new UIView[] { heading, sub, play, username, password, branch, betaPassword, manifest, toggle, start, saved, logout, progress, status, cancel }) { Axis = UILayoutConstraintAxis.Vertical, Spacing = 16, TranslatesAutoresizingMaskIntoConstraints = false };
         View.AddSubview(stack); var guide = View.SafeAreaLayoutGuide;
         NSLayoutConstraint.ActivateConstraints(new[] { stack.TopAnchor.ConstraintEqualTo(guide.TopAnchor, 24), stack.LeadingAnchor.ConstraintEqualTo(guide.LeadingAnchor, 24), stack.TrailingAnchor.ConstraintEqualTo(guide.TrailingAnchor, -24), stack.BottomAnchor.ConstraintLessThanOrEqualTo(guide.BottomAnchor, -20) });
         start.TouchUpInside += async (_, _) => await Run(false);
@@ -84,8 +87,25 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         cancel.TouchUpInside += (_, _) => active?.Cancel();
         logout.TouchUpInside += (_, _) => { try { IdentityVault.Clear(); status.Text = "Steam session removed."; } catch { status.Text = "Unable to remove session."; } };
         cancel.Enabled = false;
-        try { var installed = store.Current(); status.Text = installed is null ? "No game installed." : $"Installed Steam manifest {installed.ManifestId}. Game runtime not yet integrated."; }
-        catch { status.Text = "Existing installation could not be validated. Download again."; }
+        try { var installed = store.Current(); play.Enabled = installed is not null; status.Text = installed is null ? "No game installed." : $"Installed Steam manifest {installed.ManifestId}. Game runtime not yet integrated."; }
+        catch { play.Enabled = false; status.Text = "Existing installation could not be validated. Download again."; }
+    }
+    async Task PrepareGame()
+    {
+        if (active is not null) return;
+        using var cts = new CancellationTokenSource();
+        active = cts; SetBusy(true);
+        try
+        {
+            status.Text = "Verifying installed game…";
+            var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "STS2Saves");
+            var plan = await Task.Run(() => LaunchPlan.Prepare(store, data, cts.Token), cts.Token);
+            GameHost.RequestLaunch(plan);
+            status.Text = "Verified launch request saved. Native game host is not yet included in this build.";
+        }
+        catch (OperationCanceledException) { status.Text = "Launch preparation cancelled."; }
+        catch (Exception e) { status.Text = $"Launch preparation failed ({e.GetType().Name})."; }
+        finally { active = null; SetBusy(false); }
     }
     async Task Run(bool reuse)
     {
@@ -120,7 +140,7 @@ sealed class SetupController(SceneDelegate app) : UIViewController
         finally { active = null; SetBusy(false); }
         if (success) app.ResetLauncher(); // In-process reset only; real jailbreak relaunch is a separate device-dependent adapter.
     }
-    void SetBusy(bool busy) { start.Enabled = saved.Enabled = logout.Enabled = username.Enabled = password.Enabled = branch.Enabled = manifest.Enabled = betaPassword.Enabled = remember.Enabled = !busy; cancel.Enabled = busy; }
+    void SetBusy(bool busy) { play.Enabled = !busy && File.Exists(Path.Combine(store.Root, "current.json")); start.Enabled = saved.Enabled = logout.Enabled = username.Enabled = password.Enabled = branch.Enabled = manifest.Enabled = betaPassword.Enabled = remember.Enabled = !busy; cancel.Enabled = busy; }
     Task<string> PickBranch(IReadOnlyList<SteamSession.GameBranch> branches, string selected, CancellationToken ct)
     {
         var result = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
