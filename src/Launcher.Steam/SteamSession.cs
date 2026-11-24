@@ -127,22 +127,33 @@ public sealed class SteamSession : IAsyncDisposable
                         progress?.Report(new("download", done, total));
                         continue;
                     }
-                    File.Delete(output);
                 }
-                using (var stream = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (var stream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
                 {
                     ulong cursor = 0;
                     foreach (var chunk in file.Chunks.OrderBy(c => c.Offset))
                     {
                         ct.ThrowIfCancellationRequested();
                         if (chunk.Offset != cursor || chunk.UncompressedLength == 0 || chunk.UncompressedLength > 64 * 1024 * 1024 || cursor > file.TotalSize || chunk.UncompressedLength > file.TotalSize - cursor) throw new InvalidDataException("Invalid chunk bounds or gap.");
-                        var data = new byte[checked((int)chunk.UncompressedLength)];
+                        int length = checked((int)chunk.UncompressedLength);
+                        if (ChunkCache.Verify(stream, checked((long)cursor), length, chunk.ChunkID))
+                        {
+                            cursor += (uint)length; done += length;
+                            progress?.Report(new("download", done, total));
+                            continue;
+                        }
+                        stream.SetLength(checked((long)cursor));
+                        stream.Position = checked((long)cursor);
+                        var data = new byte[length];
                         var size = await FromCdn((s, t) => cdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t));
                         if (size != data.Length) throw new InvalidDataException("Unexpected chunk size.");
+                        if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(data), chunk.ChunkID))
+                            throw new InvalidDataException("Downloaded chunk hash mismatch.");
                         await stream.WriteAsync(data, ct); cursor += (uint)size; done += size;
                         progress?.Report(new("download", done, total));
                     }
                     if (cursor != file.TotalSize) throw new InvalidDataException("File length mismatch.");
+                    stream.SetLength(checked((long)file.TotalSize));
                     stream.Flush(true);
                 }
                 using var read = File.OpenRead(output);

@@ -65,6 +65,12 @@ try
     File.AppendAllText(Path.Combine(root, "payload-" + newer.PayloadId, Payload.Required[0]), "corruption");
     Reject(() => store.ActivateVersion(newer.PayloadId));
     Assert(store.Current() == receipt, "Corrupt rollback preserves active version");
-    Console.WriteLine("All payload, download and rollback fixture assertions passed.");
+    using var partial = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
+    Assert(ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 3 })), "Resume verified first chunk");
+    Assert(ChunkCache.Verify(partial, 3, 2, SHA1.HashData(new byte[] { 4, 5 })), "Resume verified later chunk");
+    Assert(!ChunkCache.Verify(partial, 3, 3, expected), "Reject incomplete chunk");
+    Assert(!ChunkCache.Verify(partial, 0, 3, SHA1.HashData(new byte[] { 1, 2, 4 })), "Reject corrupted chunk");
+    Assert(!ChunkCache.Verify(partial, -1, 3, expected), "Reject negative offset");
+    Console.WriteLine("All payload, download, chunk and rollback fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

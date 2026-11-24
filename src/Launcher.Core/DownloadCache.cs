@@ -26,3 +26,25 @@ public sealed record TransferEstimate(double BytesPerSecond, TimeSpan? Remaining
             seconds < TimeSpan.MaxValue.TotalSeconds ? TimeSpan.FromSeconds(seconds) : null);
     }
 }
+
+public static class ChunkCache
+{
+    // Steam chunk IDs are SHA-1 hashes of the uncompressed bytes.
+    public static bool Verify(Stream stream, long offset, int length, byte[] hash)
+    {
+        if (offset < 0 || length <= 0 || length > 64 * 1024 * 1024 ||
+            offset > stream.Length || length > stream.Length - offset) return false;
+        stream.Position = offset;
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        var buffer = new byte[Math.Min(length, 65536)];
+        int remaining = length;
+        while (remaining > 0)
+        {
+            int count = stream.Read(buffer, 0, Math.Min(remaining, buffer.Length));
+            if (count == 0) return false;
+            digest.AppendData(buffer, 0, count);
+            remaining -= count;
+        }
+        return CryptographicOperations.FixedTimeEquals(digest.GetHashAndReset(), hash);
+    }
+}
