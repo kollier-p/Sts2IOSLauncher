@@ -77,6 +77,12 @@ try
     var liveSample = meter.Add(200, true, TimeSpan.FromSeconds(2));
     Assert(liveSample.Completed == 600 && liveSample.Estimate.BytesPerSecond == 100 && liveSample.Estimate.Remaining == TimeSpan.FromSeconds(4), "Mixed cached and live transfer ETA");
     Reject(() => meter.Add(401, true, TimeSpan.FromSeconds(3)));
-    Console.WriteLine("All payload, download, chunk, meter and rollback fixture assertions passed.");
+    Assert(store.VerifyForLaunch().Receipt == receipt, "Verified launch payload");
+    var installedAssembly = Path.Combine(root, "payload-" + receipt.PayloadId, Payload.Required[2]);
+    File.AppendAllText(installedAssembly, "corrupt assembly");
+    Reject(() => store.VerifyForLaunch());
+    Reject(() => store.ActivateVersion(receipt.PayloadId));
+    Assert(store.Current() == receipt, "Integrity failure never changes active pointer");
+    Console.WriteLine("All payload, download, chunk, meter, integrity and rollback fixture assertions passed.");
 }
 finally { Directory.Delete(root, true); }

@@ -46,7 +46,7 @@ public static class Payload
     }
 }
 
-public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId);
+public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId, string? InventorySha256 = null);
 public sealed class PayloadStore(string root)
 {
     public string Root { get; } = Path.GetFullPath(root);
@@ -61,7 +61,7 @@ public sealed class PayloadStore(string root)
         using var file = File.OpenRead(Payload.SafePath(staging, Payload.Required[0]));
         var hash = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant(); file.Dispose();
         var id = $"{manifestId}-{Guid.NewGuid():N}";
-        var receipt = new InstallReceipt(Payload.AppId, Payload.WindowsDepot, manifestId, branch, hash, 2, patched, id);
+        var receipt = new InstallReceipt(Payload.AppId, Payload.WindowsDepot, manifestId, branch, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct));
         File.WriteAllText(Path.Combine(staging, ".payload_manifest.json"), JsonSerializer.Serialize(receipt));
         ct.ThrowIfCancellationRequested();
         var destination = Path.Combine(Root, "payload-" + id);
@@ -104,6 +104,7 @@ public sealed class PayloadStore(string root)
         using (var stream = File.OpenRead(Payload.SafePath(directory, Payload.Required[0])))
             if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), receipt.PckSha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Installed PCK checksum mismatch.");
+        if (receipt.InventorySha256 is not null) PayloadIntegrity.Verify(directory, receipt.InventorySha256);
         var temp = Path.Combine(Root, "current-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
@@ -112,6 +113,14 @@ public sealed class PayloadStore(string root)
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return receipt;
+    }
+    public (InstallReceipt Receipt, string Directory) VerifyForLaunch(CancellationToken ct = default)
+    {
+        var receipt = Current() ?? throw new InvalidDataException("No installed game.");
+        var directory = Payload.SafePath(Root, "payload-" + receipt.PayloadId);
+        if (receipt.InventorySha256 is null) throw new InvalidDataException("Legacy installation requires reinstallation for full verification.");
+        PayloadIntegrity.Verify(directory, receipt.InventorySha256, ct);
+        return (receipt, directory);
     }
     public InstallReceipt? Current()
     {
