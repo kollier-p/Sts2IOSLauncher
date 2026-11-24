@@ -10,6 +10,19 @@ try
 {
     void Assert(bool test, string message) { if (!test) throw new Exception(message); }
     void Reject(Action action) { try { action(); } catch (Exception e) when (e is InvalidDataException or IOException or ArgumentException or OperationCanceledException) { return; } throw new Exception("Expected rejection"); }
+    var copySource = Path.Combine(root, "copy-source");
+    var copyTarget = Path.Combine(root, "copy-target");
+    var copyBytes = new byte[2 * 1024 * 1024 + 17];
+    new Random(42).NextBytes(copyBytes);
+    File.WriteAllBytes(copySource, copyBytes);
+    Reject(() => LaunchCopy.Copy(copySource, copyTarget, new CancellationToken(true)));
+    Assert(!File.Exists(copyTarget), "Cancelled launch copy does not create a file");
+    LaunchCopy.Copy(copySource, copyTarget);
+    Assert(File.ReadAllBytes(copyTarget).SequenceEqual(copyBytes), "Launch copy preserves all bytes across buffer boundaries");
+    Reject(() => LaunchCopy.Copy(copySource, copyTarget));
+    Assert(File.ReadAllBytes(copyTarget).SequenceEqual(copyBytes), "Launch copy never overwrites an existing staging file");
+    File.Delete(copySource);
+    File.Delete(copyTarget);
     foreach (var path in new[] { "../x", "/x", "C:\\x", "a/../x", "a//x" }) Reject(() => Payload.Normalize(path));
     Assert(Payload.Include("data_sts2_windows_x86_64/sts2.dll"), "Include assembly");
     Assert(!Payload.Include("SlayTheSpire2.exe"), "Exclude native PC executable");

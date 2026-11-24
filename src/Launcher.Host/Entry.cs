@@ -573,7 +573,7 @@ public static class Entry
             if (NativeClone(plan.Pack, temporary, 0) != 0)
             {
                 PayloadStorage.EnsureCapacity(documents, new FileInfo(plan.Pack).Length);
-                File.Copy(plan.Pack, temporary);
+                LaunchCopy.Copy(plan.Pack, temporary, ct);
             }
             PckScripts.Add(temporary, plan.GameAssembly, ct);
             PckExtensions.Patch(temporary, ct);

@@ -12,8 +12,10 @@ Target device is a JIT-enabled 11-inch iPad Pro running iPadOS 17.6.3. Feature c
 | Save management | Manual snapshots, verified restore, WebDAV push and pull, and Steam Cloud upload and download are implemented. Automatic sync and live provider validation remain open. |
 | Launcher utilities | The iPad interface groups Play, Install, and Saves. Persistent diagnostics are implemented. Mod management, Workshop, Nexus, file browser, localization, and settings remain open. |
 
-The CI gate covers ARM64 compilation, linking, bundle staging, and unsigned IPA validation. Readiness for device testing also requires an authorized distribution and signing path. Steam sign-in, installation, and gameplay on a physical iPad are separate verification gates.
+The pre-IPA CI gate covers ARM64 compilation, linking and bundle staging; packaging is separate. Readiness for device testing also requires an authorized distribution and signing path. Steam sign-in, installation, and gameplay on a physical iPad are separate verification gates.
 
 Download checks validate full chunk layouts before cache reuse, retry corrupt chunks on alternate CDN servers, and honor worker cancellation between requests. The installer checks available space, accounting for partial data already on disk. Launch preparation checks space if it needs to copy the PCK. Offline fixtures cover these paths, with live CDN behavior still to verify.
 
-Inactive installations with intact receipts remain selectable for removal even when required game files are missing; activation still validates required files and inventory before switching. This permits storage recovery without deleting the active installation. Regression coverage is pending CI on the implementing revision.
+Inactive installations with intact receipts remain selectable for removal even when required game files are missing; activation still validates required files and inventory before switching. This permits storage recovery without deleting the active installation. Regression coverage passed on revision 79c095c.
+
+Launch preparation uses a cancellable buffered copy when filesystem cloning is unavailable. The original verified pack remains untouched, and the host removes the disposable staging file on failure. Offline copy fixtures are pending CI; actual iPad filesystem behavior remains unverified.
