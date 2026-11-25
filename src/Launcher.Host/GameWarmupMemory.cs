@@ -6,7 +6,6 @@ internal sealed class GameWarmupMemory
 {
     const ulong MiB = GameMemory.MiB;
     const ulong MaxVideoGrowth = 128 * MiB;
-    const ulong MinProcessHeadroom = 640 * MiB;
 
     readonly MethodInfo renderingInfo;
     readonly object videoMemory;
@@ -26,7 +25,7 @@ internal sealed class GameWarmupMemory
         if (initialVideo == 0) initialVideo = video;
         if (video > initialVideo && video - initialVideo >= MaxVideoGrowth)
             return $"renderer memory grew {(video - initialVideo) / MiB} MiB";
-        if (GameMemory.AvailableBytes() is ulong available && available < MinProcessHeadroom)
+        if (GameMemory.AvailableBytes() is ulong available && available < GameMemory.MenuHeadroom)
             return $"iPad process headroom {available / MiB} MiB";
         return null;
     }

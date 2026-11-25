@@ -170,9 +170,9 @@ var preloadPolicy = typeof(Entry).Assembly.GetType("Launcher.Host.GameAssetPrelo
     .GetMethod("IsLowMemoryMenuPreload", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
 bool defersPreload(string name, ulong? available) => preloadPolicy.Invoke(null, [name, available]) is true;
 const ulong mib = 1024 * 1024;
-Check(defersPreload("Common", 597 * mib) && defersPreload("MainMenu", 0),
-    "Desktop menu preloads yield under process memory pressure");
-Check(!defersPreload("Common", 1024 * mib) && !defersPreload("Common", null) &&
+Check(defersPreload("Common", 1636 * mib) && defersPreload("Common", 518 * mib) && defersPreload("MainMenu", 0),
+    "Menu preload reserves enough space for the measured startup batch and the return from a run");
+Check(!defersPreload("Common", 2560 * mib) && !defersPreload("Common", null) &&
     !defersPreload("MainMenuEssentials", 0) && !defersPreload("Combat Room", 0),
     "The memory guard preserves essential and gameplay loads and leaves healthy and unmeasured devices alone");
 

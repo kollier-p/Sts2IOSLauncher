@@ -53,11 +53,23 @@ internal static class GameSession
     public static void ReturnToMainMenuPrefix()
     {
         GameMemory.Log("returning from the run to the game main menu");
+        GameRenderWarmup.ReleaseRetainedAssets();
         if (OperatingSystem.IsIOS())
             _ = LogMenuReturnMemoryAsync(Interlocked.Increment(ref menuReturnGeneration));
     }
 
-    public static void LoadMainMenuPrefix() => GameMemory.Log("game loading its main menu scene");
+    public static void LoadMainMenuPrefix()
+    {
+        if (GameMemory.AvailableBytes() is ulong bytes && bytes < GameMemory.MenuHeadroom)
+        {
+            // The run teardown and the game's cache eviction have run by this
+            // point. Collect unused Godot resource wrappers without waiting
+            // for finalizers on the game thread.
+            GC.Collect();
+            GameMemory.Log("collected unused managed objects before loading the game main menu");
+        }
+        GameMemory.Log("game loading its main menu scene");
+    }
 
     public static void ReturnToMainMenuPostfix(Task __result) => _ = ObserveMenuReturnAsync(__result);
 
@@ -66,7 +78,7 @@ internal static class GameSession
     static async Task LogMenuReturnMemoryAsync(int generation)
     {
         int elapsed = 0;
-        foreach (int seconds in new[] { 1, 1, 2, 4 })
+        foreach (int seconds in new[] { 1, 1, 1, 1, 4 })
         {
             await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(false);
             if (Volatile.Read(ref menuReturnGeneration) != generation) return;

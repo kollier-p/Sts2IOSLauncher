@@ -5,6 +5,7 @@ namespace Launcher.Host;
 internal static class GameMemory
 {
     internal const ulong MiB = 1024 * 1024;
+    internal const ulong MenuHeadroom = 1024 * MiB;
 
     internal static ulong? AvailableBytes() => OperatingSystem.IsIOS() ? AvailableProcessMemory() : null;
 

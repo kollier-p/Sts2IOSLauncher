@@ -88,6 +88,16 @@ internal sealed class GameRenderWarmup
         CatalogDirectory = null;
     }
 
+    internal static void ReleaseRetainedAssets()
+    {
+        if (RetainedAssets.Count == 0) return;
+        var count = RetainedAssets.Count;
+        // Godot scenes may still own these resources. Drop the launcher's
+        // references and let the engine and managed runtime release them.
+        RetainedAssets.Clear();
+        GameMemory.Log($"released {count} startup warmup asset references");
+    }
+
     Type Godot(string type) => godot.GetType("Godot." + type, throwOnError: true)!;
     object New(string type, params object[] inputs) => Activator.CreateInstance(Godot(type), inputs)!;
     static void Set(object target, string property, object value) => target.GetType().GetProperty(property)!.SetValue(target, value);
@@ -182,12 +192,15 @@ internal sealed class GameRenderWarmup
                 "startup preload using standard after interrupted or unavailable extended preload");
         }
         visuals = new GameWarmupVisuals(Godot);
-        if (extended)
+        if (extended || OperatingSystem.IsIOS())
         {
             var renderingServer = Godot("RenderingServer");
             memory = new GameWarmupMemory(renderingServer, Godot("RenderingServer+RenderingInfo"));
-            var method = renderingServer.GetMethod("GetCurrentRenderingMethod", Type.EmptyTypes)!.Invoke(null, null) as string;
-            gpuParticles = method is "mobile" or "gl_compatibility" or "forward_plus";
+            if (extended)
+            {
+                var method = renderingServer.GetMethod("GetCurrentRenderingMethod", Type.EmptyTypes)!.Invoke(null, null) as string;
+                gpuParticles = method is "mobile" or "gl_compatibility" or "forward_plus";
+            }
         }
         if (catalogDirectory is { } directory)
             catalogPath = Path.Combine(directory, extended ? "startup-assets-extended-v1.txt" : "startup-assets-v1.txt");

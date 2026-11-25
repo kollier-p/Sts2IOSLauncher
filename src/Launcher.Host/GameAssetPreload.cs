@@ -4,9 +4,10 @@ namespace Launcher.Host;
 
 internal static class GameAssetPreload
 {
-    // Desktop BC textures may expand to RGBA8 before upload on iPad. Keep
-    // memory available for the actual menu scene, its dependencies and mods.
-    const ulong MenuReserve = 1024 * GameMemory.MiB;
+    // A startup Common batch consumed over a GiB of process headroom before
+    // it finished. Reserve space for the whole batch as well as future scenes.
+    const ulong BulkPreloadAllowance = 1536 * GameMemory.MiB;
+    const ulong RequiredHeadroom = GameMemory.MenuHeadroom + BulkPreloadAllowance;
     const BindingFlags StaticMethods = BindingFlags.Public | BindingFlags.NonPublic |
         BindingFlags.Static | BindingFlags.DeclaredOnly;
     static MethodInfo? emptySession;
@@ -36,7 +37,7 @@ internal static class GameAssetPreload
     }
 
     internal static bool IsLowMemoryMenuPreload(string? name, ulong? available) =>
-        (name is "Common" or "MainMenu") && available is ulong bytes && bytes < MenuReserve;
+        (name is "Common" or "MainMenu") && available is ulong bytes && bytes < RequiredHeadroom;
 
     static bool LoadAssetsPrefix<TSession>(object[] __args, ref TSession __result)
     {
@@ -56,7 +57,8 @@ internal static class GameAssetPreload
         {
             if (emptySession!.Invoke(null, null) is not TSession empty) return true;
             __result = empty;
-            HostDiagnostics.Stage($"deferred game {name} preload (iPad process headroom {available / GameMemory.MiB} MiB)");
+            HostDiagnostics.Stage($"deferred game {name} preload (iPad process headroom {available / GameMemory.MiB} MiB, " +
+                $"needs {RequiredHeadroom / GameMemory.MiB} MiB for bulk preload)");
             return false;
         }
         catch (Exception error)
