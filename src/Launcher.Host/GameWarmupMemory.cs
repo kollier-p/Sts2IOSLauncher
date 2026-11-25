@@ -12,7 +12,7 @@ internal sealed class GameWarmupMemory
     readonly MethodInfo renderingInfo;
     readonly object videoMemory;
     readonly bool queryProcessMemory = OperatingSystem.IsIOS();
-    readonly ulong initialVideo;
+    ulong initialVideo;
 
     internal GameWarmupMemory(Type renderingServer, Type renderingInfoType)
     {
@@ -24,7 +24,9 @@ internal sealed class GameWarmupMemory
     internal string? LimitReached()
     {
         var video = VideoBytes();
-        if (initialVideo != 0 && video > initialVideo && video - initialVideo >= MaxVideoGrowth)
+        // An early menu can reach _Ready before the renderer publishes memory counters.
+        if (initialVideo == 0) initialVideo = video;
+        if (video > initialVideo && video - initialVideo >= MaxVideoGrowth)
             return $"renderer memory grew {(video - initialVideo) / MiB} MiB";
         if (queryProcessMemory)
         {

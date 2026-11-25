@@ -149,6 +149,11 @@ internal sealed class GameRenderWarmup
             {
                 if (extended && gamePreload is { IsCompleted: false })
                 {
+                    if (memory?.LimitReached() is { } limit)
+                    {
+                        Finish(limit);
+                        return;
+                    }
                     if (!waitingForGame)
                     {
                         waitingForGame = true;
