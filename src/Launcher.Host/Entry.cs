@@ -29,13 +29,14 @@ public static class Entry
     static InstallReceipt? current;
     static InstallReceipt? profileVersion;
     static State state = new("idle", "No game installed");
+    static volatile SavedSteamLogin? steamLogin;
 
+    sealed record SavedSteamLogin(SteamIdentity Identity, bool Persistent);
     sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null);
     sealed record State(string Stage, string Message, long Completed = 0, long Total = 0, double Speed = 0,
         string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0,
-        string? Installed = null, string? Profile = null);
-    sealed record Request(string Username, string Password, string Branch, string? Manifest, string? BetaPassword,
-        bool Remember = false, bool Saved = false);
+        string? Installed = null, string? Profile = null, string? SteamAccount = null, bool SteamSessionTemporary = false);
+    sealed record Request(string? Username, string? Password, string Branch, string? Manifest, string? BetaPassword);
 
     static void Publish(State next)
     {
@@ -65,6 +66,14 @@ public static class Entry
             { HostDiagnostics.Error("read launch profiles", error); }
             AssemblyLoadContext.Default.Resolving += Resolve;
             AssemblyLoadContext.Default.ResolvingUnmanagedDll += NativeLibraries.Resolve;
+            if (OperatingSystem.IsIOS())
+            {
+                try
+                {
+                    if (SteamVault.Load() is { } session) steamLogin = new(session, true);
+                }
+                catch (Exception error) { HostDiagnostics.Error("restore Steam login", error); }
+            }
             try
             {
                 current = store.Current();
@@ -109,10 +118,13 @@ public static class Entry
     public static int CopyStatus(nint buffer, int capacity)
     {
         byte[] json;
+        var login = steamLogin;
         lock (Sync) json = JsonSerializer.SerializeToUtf8Bytes(state with
         {
             Installed = (activeProfile?.PayloadId is null ? current : profileVersion)?.DisplayName(),
-            Profile = activeProfile?.Name
+            Profile = activeProfile?.Name,
+            SteamAccount = login?.Identity.AccountName,
+            SteamSessionTemporary = login is { Persistent: false }
         });
         if (buffer == 0 || capacity <= json.Length) return -json.Length - 1;
         Marshal.Copy(json, 0, buffer, json.Length);
@@ -126,7 +138,7 @@ public static class Entry
         try
         {
             var request = JsonSerializer.Deserialize<Request>(Str(input)) ?? throw new InvalidDataException();
-            if (!request.Saved && (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrEmpty(request.Password)))
+            if (!string.IsNullOrEmpty(request.Password) && string.IsNullOrWhiteSpace(request.Username))
                 return -2;
             ulong? exact = null;
             if (!string.IsNullOrWhiteSpace(request.Manifest))
@@ -146,25 +158,7 @@ public static class Entry
 
     static async Task<State> Download(PayloadStore payloads, Request request, ulong? exact, CancellationToken ct)
     {
-        await using var session = new SteamSession();
-        if (request.Saved)
-        {
-            var saved = SteamVault.Load();
-            if (saved is null) return new("error", "No Steam session saved. Sign in with your account.");
-            await session.LogOnAsync(saved, true, ct);
-        }
-        else
-        {
-            var previous = request.Remember ? SteamVault.Load() : null;
-            var username = request.Username.Trim();
-            var guardData = string.Equals(previous?.AccountName, username, StringComparison.OrdinalIgnoreCase) ? previous?.GuardData : null;
-            var identity = await session.AuthenticateAsync(username, request.Password, new Guard(ct), guardData, request.Remember, ct);
-            if (request.Remember)
-            {
-                try { SteamVault.Save(identity); }
-                catch (Exception error) { HostDiagnostics.Error("keychain", error); }
-            }
-        }
+        await using var session = await OpenSteamAsync(ct, request.Username, request.Password);
 
         var branch = string.IsNullOrWhiteSpace(request.Branch) ? "public" : request.Branch.Trim();
         IReadOnlyList<SteamSession.GameBranch>? branches = null;
@@ -204,6 +198,79 @@ public static class Entry
         });
         var receipt = await session.DownloadAndInstallAsync(payloads, branch, exact, reporter, ct, beta);
         return SetCurrent(receipt, "Steam installation complete.");
+    }
+
+    static async Task<SteamSession> OpenSteamAsync(CancellationToken ct, string? username = null, string? password = null)
+    {
+        var saved = steamLogin;
+        var account = username?.Trim();
+        var savedAccountMatches = saved is not null && (string.IsNullOrEmpty(account) ||
+            string.Equals(saved.Identity.AccountName, account, StringComparison.OrdinalIgnoreCase));
+        var expired = false;
+        if (saved is not null && savedAccountMatches && string.IsNullOrEmpty(password))
+        {
+            Publish(new("auth", "Connecting with your saved Steam session…"));
+            try
+            {
+                return await ConnectSteamAsync(async session =>
+                {
+                    await session.LogOnAsync(saved.Identity, true, ct);
+                    if (!saved.Persistent) RememberSteamLogin(saved.Identity);
+                });
+            }
+            catch (SteamLogOnException error) when (error.RequiresSignIn)
+            {
+                expired = true;
+                account = saved.Identity.AccountName;
+                steamLogin = null;
+                try { SteamVault.Clear(); }
+                catch (Exception clearError) { HostDiagnostics.Error("clear expired Steam login", clearError); }
+            }
+        }
+
+        if (string.IsNullOrEmpty(account)) account = (await Ask("steam-user", "Enter your Steam account name", ct)).Trim();
+        if (account.Length == 0) throw new ArgumentException("Enter your Steam account name.");
+        if (string.IsNullOrEmpty(password)) password = await Ask("steam-password", expired
+            ? $"Your session expired. Enter the Steam password for {account}." : $"Enter the Steam password for {account}.", ct);
+        if (password.Length == 0) throw new ArgumentException("Enter your Steam password.");
+        var guardData = string.Equals(saved?.Identity.AccountName, account, StringComparison.OrdinalIgnoreCase)
+            ? saved?.Identity.GuardData : null;
+        Publish(new("auth", "Signing in to Steam…"));
+        return await ConnectSteamAsync(async session =>
+        {
+            var identity = await session.AuthenticateAsync(account, password, new Guard(ct), guardData, true, ct);
+            RememberSteamLogin(identity);
+        });
+    }
+
+    static async Task<SteamSession> ConnectSteamAsync(Func<SteamSession, Task> signIn)
+    {
+        var session = new SteamSession();
+        try
+        {
+            await signIn(session);
+            return session;
+        }
+        catch
+        {
+            try { await session.DisposeAsync(); }
+            catch (Exception error) { HostDiagnostics.Error("disconnect Steam after sign-in failure", error); }
+            throw;
+        }
+    }
+
+    static void RememberSteamLogin(SteamIdentity identity)
+    {
+        try
+        {
+            SteamVault.Save(identity);
+            steamLogin = new(identity, true);
+        }
+        catch (Exception error)
+        {
+            steamLogin = new(identity, false);
+            HostDiagnostics.Error("save Steam login", error);
+        }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
@@ -637,14 +704,7 @@ public static class Entry
             if (action is not ("pull" or "push")) throw new InvalidDataException("Invalid Steam Cloud action.");
             var settings = await Ask("steam-cloud-settings", "Include game settings in sync?", ct,
                 [new("no", "Saves only", "Keep device settings local"), new("yes", "Include settings", "Sync settings.save along with saves")]);
-            var saved = SteamVault.Load();
-            var user = saved is null ? (await Ask("steam-user", "Enter your Steam account name", ct)).Trim() : saved.AccountName;
-            var password = saved is null ? await Ask("steam-password", "Enter your Steam password", ct) : "";
-            if (user.Length == 0 || (saved is null && password.Length == 0)) return new("error", "Enter your Steam account name and password.");
-            Publish(new("auth", "Connecting to Steam Cloud…"));
-            await using var session = new SteamSession();
-            if (saved is null) await session.AuthenticateAsync(user, password, new Guard(ct), null, false, ct);
-            else await session.LogOnAsync(saved, true, ct);
+            await using var session = await OpenSteamAsync(ct);
 
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
             var cloud = session.OpenCloud(http);
@@ -655,10 +715,14 @@ public static class Entry
             var history = Payload.SafePath(support, "SteamCloudBaselines");
             var upload = action == "push";
             Publish(new("cloud", "Comparing local and Steam Cloud saves…"));
+            var progress = new DirectProgress<SteamCloudDownloadProgress>(download => Publish(new("cloud",
+                download.Applying ? $"Backing up and applying {download.TotalFiles} Steam Cloud saves…" :
+                $"Downloading Steam Cloud save {download.VerifiedFiles + 1} of {download.TotalFiles}…",
+                download.CompletedBytes, download.TotalBytes)));
             SaveSyncResult result;
             try
             {
-                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, false, ct);
+                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, false, ct, progress);
             }
             catch (SaveSyncConflictException conflict)
             {
@@ -668,7 +732,7 @@ public static class Entry
                          upload ? "Replace conflicting files in Steam Cloud" : "Back up local saves before replacing them")]);
                 if (resolution != "replace") return new("idle", "Steam Cloud changes kept on both sides.");
                 Publish(new("cloud", "Applying the selected Steam Cloud changes…"));
-                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, true, ct);
+                result = await cloud.SyncAsync(saveDirectory, snapshots, history, profileKey, settings == "yes", upload, true, ct, progress);
             }
             return new("idle", upload ? $"Uploaded {result.Transferred} save files to Steam Cloud." : $"Downloaded {result.Transferred} Steam Cloud save files.");
         }) ? 0 : -1;
@@ -879,11 +943,18 @@ public static class Entry
              new("latest", "New releases", "Browse recently published items"),
              new("updated", "Recent updates", "Browse recently updated items"),
              new("subscribed", "Most subscribed", "Browse by subscriptions"),
+             new("mine", "My subscriptions", "Browse the mods you subscribe to on Steam"),
              new("search", "Search Workshop", "Enter a title, item ID, or link"),
              new("item", "Open item", "Enter an item ID or Steam Community link"),
              new("updates", "Installed Workshop items", "Check this profile for updates")]);
         using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
         var workshop = new WorkshopFiles(http);
+        if (action == "mine")
+        {
+            await using var session = await OpenSteamAsync(ct);
+            return await BrowseWorkshopPagesAsync(workshop, (page, token) => session.WorkshopSubscriptionsAsync(page, token),
+                ct, session);
+        }
         if (action == "updates") return await BrowseWorkshopUpdatesAsync(workshop, ct);
         if (action == "item")
         {
@@ -909,30 +980,44 @@ public static class Entry
             if (!int.TryParse(range, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out days))
                 return new("error", "Choose a Workshop time range.");
         }
+        return await BrowseWorkshopPagesAsync(workshop, (page, token) => workshop.BrowseAsync(sort, page, query, days, token), ct);
+    }
+
+    static async Task<State> BrowseWorkshopPagesAsync(WorkshopFiles workshop, Func<int, CancellationToken, Task<WorkshopPage>> load,
+        CancellationToken ct, SteamSession? session = null)
+    {
         var page = 1;
+        var title = session is null ? "Workshop" : "My subscriptions";
         while (true)
         {
-            Publish(new("mods", "Loading Steam Workshop…"));
-            var results = await workshop.BrowseAsync(sort, page, query, days, ct);
-            if (results.Items.Count == 0) return new("idle", "Steam Workshop returned no matching items.");
+            Publish(new("mods", session is null ? "Loading Steam Workshop…" : "Loading your Workshop subscriptions…"));
+            WorkshopPage results;
+            try { results = await load(page, ct); }
+            catch (Exception error) when (session is not null && error is IOException or TimeoutException)
+            {
+                HostDiagnostics.Error("Workshop subscriptions", error);
+                return new("error", "Could not load your Workshop subscriptions. Try again.");
+            }
             var choices = results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary,
                 item.Thumbnail?.AbsoluteUri)).ToList();
             if (results.Index > 1) choices.Add(new("previous", "Previous page", ""));
             if (results.Index < results.Pages) choices.Add(new("next", "Next page", ""));
-            var selection = await Ask("workshop-page", $"Workshop · Page {results.Index} of {results.Pages}", ct, choices.ToArray());
+            if (choices.Count == 0) return new("idle", session is null ? "Steam Workshop returned no matching items." :
+                "You have no available Workshop subscriptions for Slay the Spire 2.");
+            var selection = await Ask("workshop-page", $"{title} · Page {results.Index} of {Math.Max(1, results.Pages)}", ct, choices.ToArray());
             if (selection == "previous") page = Math.Max(1, results.Index - 1);
             else if (selection == "next") page = checked(results.Index + 1);
             else if (WorkshopFiles.ParseId(selection) is ulong selected && results.Items.Any(item => item.Id == selected))
-                return await OpenWorkshopItemAsync(workshop, selected, ct);
+                return await OpenWorkshopItemAsync(workshop, selected, ct, session);
             else return new("idle", "Workshop browsing cancelled.");
         }
     }
 
-    static async Task<State> OpenWorkshopItemAsync(WorkshopFiles workshop, ulong id, CancellationToken ct)
+    static async Task<State> OpenWorkshopItemAsync(WorkshopFiles workshop, ulong id, CancellationToken ct, SteamSession? session = null)
     {
         Publish(new("mods", "Reading Workshop item…"));
-        var item = await workshop.LookupAsync(id, ct);
-        return await InstallWorkshopItemAsync(workshop, item, null, ct);
+        var item = session is null ? await workshop.LookupAsync(id, ct) : (await session.WorkshopDetailsAsync(id, ct)).Item;
+        return await InstallWorkshopItemAsync(workshop, item, null, ct, session);
     }
 
     static async Task<State> BrowseWorkshopUpdatesAsync(WorkshopFiles workshop, CancellationToken ct)
@@ -956,14 +1041,14 @@ public static class Entry
     }
 
     static async Task<State> InstallWorkshopItemAsync(WorkshopFiles workshop, WorkshopItem item, WorkshopOrigin? previous,
-        CancellationToken ct)
+        CancellationToken ct, SteamSession? session = null)
     {
         var choices = new List<Choice>();
         if (item.Download is not null && (previous is null || previous.Manifest is null))
             choices.Add(new("direct", "Import public download", $"Workshop item {item.Id}"));
-        choices.Add(new("steampipe", "Choose a Steam Workshop version", "Sign in to view available SteamPipe manifests"));
+        choices.Add(new("steampipe", "Choose a Steam Workshop version", "View available SteamPipe manifests"));
         var action = await Ask("workshop-install", item.Title, ct, choices.ToArray());
-        if (action == "steampipe") return await WorkshopSteamPipeAsync(item, previous?.Branch, ct);
+        if (action == "steampipe") return await WorkshopSteamPipeAsync(item, previous?.Branch, ct, session);
         if (action != "direct" || item.Download is null) return new("idle", "Workshop import cancelled.");
         var staging = Directory.CreateTempSubdirectory("sts2-workshop-").FullName;
         try
@@ -976,16 +1061,10 @@ public static class Entry
         finally { Directory.Delete(staging, recursive: true); }
     }
 
-    static async Task<State> WorkshopSteamPipeAsync(WorkshopItem item, string? previousBranch, CancellationToken ct)
+    static async Task<State> WorkshopSteamPipeAsync(WorkshopItem item, string? previousBranch, CancellationToken ct, SteamSession? session)
     {
-        var saved = SteamVault.Load();
-        var user = saved is null ? (await Ask("steam-user", "Enter your Steam account name", ct)).Trim() : saved.AccountName;
-        var password = saved is null ? await Ask("steam-password", "Enter your Steam password", ct) : "";
-        if (user.Length == 0 || (saved is null && password.Length == 0)) return new("error", "Enter your Steam account name and password.");
-        Publish(new("auth", "Signing in to Steam Workshop…"));
-        await using var session = new SteamSession();
-        if (saved is null) await session.AuthenticateAsync(user, password, new Guard(ct), null, false, ct);
-        else await session.LogOnAsync(saved, true, ct);
+        await using var openedSession = session is null ? await OpenSteamAsync(ct) : null;
+        session ??= openedSession!;
         Publish(new("mods", "Reading available Workshop versions…"));
         var manifests = (await session.WorkshopManifestsAsync(item, ct)).ToList();
         if (manifests.Count == 0) return new("error", "Steam returned no accessible Workshop versions.");
@@ -1224,8 +1303,14 @@ public static class Entry
         lock (Sync)
         {
             if (active is not null) return -1;
-            try { return SteamVault.Clear(); }
-            catch { return -2; }
+            try
+            {
+                SteamVault.Clear();
+                steamLogin = null;
+                state = new("idle", "Signed out of Steam.");
+                return 0;
+            }
+            catch (Exception error) { HostDiagnostics.Error("forget Steam login", error); return -2; }
         }
     }
 

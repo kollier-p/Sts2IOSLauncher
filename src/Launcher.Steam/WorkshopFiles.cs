@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Launcher.Core;
+using SteamKit2;
+using SteamKit2.Internal;
 
 namespace Launcher.Steam;
 
@@ -12,8 +14,27 @@ public enum WorkshopSort { Popular, Latest, Updated, Subscribed }
 
 public sealed class WorkshopFiles(HttpClient http)
 {
+    const int SubscriptionsPerPage = 30;
     const string Details = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
     const string Community = "https://steamcommunity.com/workshop/browse/";
+
+    public static CPublishedFile_GetUserFiles_Request SubscriptionRequest(ulong account, int page) => new()
+    {
+        steamid = account, appid = Payload.AppId, page = checked((uint)page), numperpage = SubscriptionsPerPage,
+        type = "mysubscriptions", sortmethod = "subscriptiondate", return_short_description = true,
+        strip_description_bbcode = true
+    };
+
+    public static WorkshopPage SubscriptionPage(int page, CPublishedFile_GetUserFiles_Response response)
+    {
+        var pages = Math.Max(1, (int)((response.total + (long)SubscriptionsPerPage - 1) / SubscriptionsPerPage));
+        var items = response.publishedfiledetails.Where(item => (!item.ShouldSerializeresult() || item.result == (uint)EResult.OK) &&
+            item.publishedfileid != 0 && item.consumer_appid == Payload.AppId && !item.banned)
+            .DistinctBy(item => item.publishedfileid).Select(item => new WorkshopListing(item.publishedfileid,
+                string.IsNullOrWhiteSpace(item.title) ? $"Workshop {item.publishedfileid}" : item.title,
+                Summary(item.short_description), PublicTransferUri(item.preview_url))).ToArray();
+        return new(page, pages, items);
+    }
 
     public async Task<WorkshopPage> BrowseAsync(WorkshopSort sort, int page, string search, int days, CancellationToken ct)
     {
@@ -74,13 +95,14 @@ public sealed class WorkshopFiles(HttpClient http)
                 var title = String(item, "title");
                 var summary = String(item, "short_description") ?? "";
                 var thumbnail = PublicTransferUri(String(item, "preview_url"));
-                items.Add(new(id, string.IsNullOrWhiteSpace(title) ? $"Workshop {id}" : title,
-                    new string(summary.Where(character => !char.IsControl(character)).Take(160).ToArray()), thumbnail));
+                items.Add(new(id, string.IsNullOrWhiteSpace(title) ? $"Workshop {id}" : title, Summary(summary), thumbnail));
             }
             return new((int)index.Value, (int)total.Value, items);
         }
         throw new InvalidDataException("Steam Community did not return a page for Slay the Spire 2.");
     }
+
+    static string Summary(string? text) => new((text ?? "").Where(character => !char.IsControl(character)).Take(160).ToArray());
 
     public static ulong? ParseId(string input)
     {

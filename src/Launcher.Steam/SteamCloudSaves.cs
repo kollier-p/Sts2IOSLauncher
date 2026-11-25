@@ -7,6 +7,8 @@ using SteamKit2.Internal;
 
 namespace Launcher.Steam;
 
+public sealed record SteamCloudDownloadProgress(int VerifiedFiles, int TotalFiles, long CompletedBytes, long TotalBytes, bool Applying = false);
+
 public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account, uint cell)
 {
     const string InstallPrefix = "%GameInstall%/";
@@ -22,7 +24,8 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
     }
 
     public async Task<SaveSyncResult> SyncAsync(string localRoot, string snapshotRoot, string baselineRoot,
-        string profileKey, bool includeSettings, bool upload, bool overwriteConflicts, CancellationToken ct)
+        string profileKey, bool includeSettings, bool upload, bool overwriteConflicts, CancellationToken ct,
+        IProgress<SteamCloudDownloadProgress>? progress = null)
     {
         var history = new SaveSyncHistory(baselineRoot, $"Steam\n{account}\n{profileKey}");
         var local = new Dictionary<string, LocalFile>(StringComparer.OrdinalIgnoreCase);
@@ -71,14 +74,20 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
                 try
                 {
                     var files = new Dictionary<string, string>(StringComparer.Ordinal);
+                    var totalBytes = changes.Sum(path => (long)remote[path].Length);
+                    long verifiedBytes = 0;
                     foreach (var path in changes)
                     {
                         var file = Path.Combine(staging, Guid.NewGuid().ToString("N"));
-                        await Download(remote[path], file, ct);
+                        void ReportFile(long bytes) => progress?.Report(new(files.Count, changes.Count, verifiedBytes + bytes, totalBytes));
+                        ReportFile(0);
+                        await Download(remote[path], file, ReportFile, ct);
                         var destination = local.TryGetValue(path, out var existing)
                             ? Path.GetRelativePath(localRoot, existing.Path).Replace(Path.DirectorySeparatorChar, '/') : path;
                         files.Add(destination, file);
+                        verifiedBytes += remote[path].Length;
                     }
+                    progress?.Report(new(files.Count, changes.Count, verifiedBytes, totalBytes, Applying: true));
                     new SaveSnapshots(localRoot, snapshotRoot).ApplyDownloadedFiles(files, ct);
                 }
                 finally { Directory.Delete(staging, recursive: true); }
@@ -96,7 +105,7 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
         return result;
     }
 
-    async Task Download(RemoteFile file, string destination, CancellationToken ct)
+    async Task Download(RemoteFile file, string destination, Action<long> progress, CancellationToken ct)
     {
         var info = await Call(cloud.ClientFileDownload(new() { appid = Payload.AppId, filename = file.Name }), ct);
         if (info.encrypted || info.is_explicit_delete || info.raw_file_size != file.Length)
@@ -108,12 +117,14 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
         await using var body = await response.Content.ReadAsStreamAsync(ct);
         if (info.raw_file_size == info.file_size)
         {
-            await WriteDownload(body, destination, file.Length, ct);
+            await WriteDownload(body, destination, file.Length, ct, progress);
         }
         else
         {
             var compressed = destination + ".zip";
-            await WriteDownload(body, compressed, info.file_size, ct);
+            // Scale the compressed transfer to the raw size used by the save listing.
+            await WriteDownload(body, compressed, info.file_size, ct,
+                bytes => progress((long)((decimal)bytes * file.Length / info.file_size)));
             using (var archive = ZipFile.OpenRead(compressed))
             {
                 if (archive.Entries.Count != 1 || archive.Entries[0].Length != file.Length)
@@ -243,7 +254,8 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
         }
     }
 
-    static async Task WriteDownload(Stream source, string destination, uint length, CancellationToken ct)
+    static async Task WriteDownload(Stream source, string destination, uint length, CancellationToken ct,
+        Action<long>? progress = null)
     {
         PayloadStorage.EnsureCapacity(Path.GetDirectoryName(destination)!, length);
         await using var output = File.Create(destination);
@@ -255,6 +267,7 @@ public sealed class SteamCloudSaves(Cloud cloud, HttpClient http, ulong account,
             if (count == 0) throw new InvalidDataException("Truncated Steam Cloud save.");
             await output.WriteAsync(buffer.AsMemory(0, count), ct);
             remaining -= count;
+            progress?.Invoke(length - remaining);
         }
         if (await source.ReadAsync(buffer.AsMemory(0, 1), ct) != 0)
             throw new InvalidDataException("Steam Cloud save exceeds its declared size.");

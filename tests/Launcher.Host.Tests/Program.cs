@@ -111,6 +111,35 @@ var workshopPage = WorkshopFiles.ParsePage($"""<script id="valve-ssr-data" type=
 Check(workshopPage.Index == 2 && workshopPage.Pages == 5 && workshopPage.Items.Single().Id == ulong.MaxValue &&
     workshopPage.Items[0].Title == "Fixture & tools" && workshopPage.Items[0].Thumbnail?.Host == "images.steamusercontent.com",
     "Workshop browsing parses and scopes Steam's published text and thumbnails");
+const ulong accountId = 76561198000000000;
+var subscriptionRequest = WorkshopFiles.SubscriptionRequest(accountId, 2);
+Check(subscriptionRequest.steamid == accountId && subscriptionRequest.appid == Launcher.Core.Payload.AppId &&
+    subscriptionRequest.type == "mysubscriptions" && subscriptionRequest.sortmethod == "subscriptiondate" && subscriptionRequest.page == 2,
+    "Workshop subscriptions query the signed-in account and preserve subscription ordering");
+var subscriptions = new SteamKit2.Internal.CPublishedFile_GetUserFiles_Response { total = 91 };
+subscriptions.publishedfiledetails.Add(new() { publishedfileid = 123, consumer_appid = Launcher.Core.Payload.AppId, title = "Subscribed fixture" });
+subscriptions.publishedfiledetails.Add(new() { publishedfileid = 456, consumer_appid = 1 });
+subscriptions.publishedfiledetails.Add(new() { publishedfileid = 789, consumer_appid = Launcher.Core.Payload.AppId, banned = true });
+var subscriptionPage = WorkshopFiles.SubscriptionPage(2, subscriptions);
+Check(subscriptionPage.Index == 2 && subscriptionPage.Pages == 4 && subscriptionPage.Items.Single().Id == 123,
+    "Subscription pagination follows Steam's total even when entries are filtered");
+Check(new SteamLogOnException(SteamKit2.EResult.Expired).RequiresSignIn &&
+    !new SteamLogOnException(SteamKit2.EResult.ServiceUnavailable).RequiresSignIn,
+    "Steam token expiry requires sign-in while temporary server failures retain the saved session");
+
+var cloudDirectory = Directory.CreateTempSubdirectory("sts2-cloud-progress-").FullName;
+try
+{
+    var chunks = new List<long>();
+    using var stream = new MemoryStream(new byte[150_000]);
+    var savePath = Path.Combine(cloudDirectory, "download");
+    var write = typeof(SteamCloudSaves).GetMethod("WriteDownload", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+    await (Task)write.Invoke(null, [stream, savePath, (uint)stream.Length, CancellationToken.None, (Action<long>)chunks.Add])!;
+    Check(chunks.SequenceEqual([65_536L, 131_072L, 150_000L]) && new FileInfo(savePath).Length == stream.Length,
+        "Steam Cloud streams progress in cumulative bytes through file completion");
+}
+finally { Directory.Delete(cloudDirectory, recursive: true); }
+
 var workshopGraph = new Dictionary<ulong, IReadOnlyList<ulong>> { [1] = [2, 3], [2] = [4], [3] = [4], [4] = [] };
 Task<IReadOnlyList<ulong>> Requirements(ulong id, CancellationToken _) => Task.FromResult(workshopGraph[id]);
 var missing = await WorkshopDependencyOrder.MissingAsync(1, new HashSet<ulong> { 3 }, Requirements, CancellationToken.None);

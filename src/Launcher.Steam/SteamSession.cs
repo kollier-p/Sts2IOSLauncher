@@ -12,6 +12,11 @@ public sealed record SteamIdentity(string AccountName, string RefreshToken, stri
     public override string ToString() => "SteamIdentity [redacted]";
 }
 public sealed record DownloadProgress(string Stage, long Completed, long Total, double BytesPerSecond = 0, TimeSpan? Remaining = null);
+public sealed class SteamLogOnException(EResult result) : IOException($"Steam login failed: {result}")
+{
+    public bool RequiresSignIn => result is EResult.Expired or EResult.Revoked or EResult.InvalidPassword or
+        EResult.InvalidSignature or EResult.RequirePasswordReEntry or EResult.AccountLoginDeniedNeedTwoFactor;
+}
 public sealed class SteamSession : IAsyncDisposable
 {
     readonly SteamClient client = new();
@@ -46,7 +51,7 @@ public sealed class SteamSession : IAsyncDisposable
         await connected.Task.WaitAsync(TimeSpan.FromSeconds(45), ct);
         client.GetHandler<SteamUser>()!.LogOn(new SteamUser.LogOnDetails { Username = identity.AccountName, AccessToken = identity.RefreshToken, ShouldRememberPassword = remember });
         var result = await loggedOn.Task.WaitAsync(TimeSpan.FromSeconds(45), ct);
-        if (result != EResult.OK) throw new IOException($"Steam login failed: {result}");
+        if (result != EResult.OK) throw new SteamLogOnException(result);
         authenticated = true;
     }
     public sealed record GameBranch(string Name, string Description, bool PasswordRequired, ulong? ManifestId);
@@ -131,6 +136,19 @@ public sealed class SteamSession : IAsyncDisposable
         finally { if (processing && Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
     void RequireSession() { if (!authenticated) throw new InvalidOperationException("Steam login required."); }
+
+    public async Task<WorkshopPage> WorkshopSubscriptionsAsync(int page, CancellationToken ct)
+    {
+        RequireSession();
+        if (page < 1) throw new ArgumentOutOfRangeException(nameof(page));
+        var account = client.SteamID?.ConvertToUInt64() ?? throw new InvalidOperationException("Steam account is unavailable.");
+        var published = client.GetHandler<SteamUnifiedMessages>()!.CreateService<PublishedFile>();
+        var result = await published.GetUserFiles(WorkshopFiles.SubscriptionRequest(account, page)).ToTask()
+            .WaitAsync(TimeSpan.FromSeconds(30), ct);
+        if (result.Result != EResult.OK || result.Body is null)
+            throw new IOException($"Steam Workshop could not load subscriptions ({result.Result}).");
+        return WorkshopFiles.SubscriptionPage(page, result.Body);
+    }
 
     public async Task<(WorkshopItem Item, IReadOnlyList<ulong> Dependencies)> WorkshopDetailsAsync(ulong id, CancellationToken ct)
     {

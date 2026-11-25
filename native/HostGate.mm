@@ -258,11 +258,10 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) NSDictionary *options;
 @property(nonatomic,strong) UIWindow *window;
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
-@property(nonatomic,strong) UILabel *message,*installation,*profile;
+@property(nonatomic,strong) UILabel *message,*installation,*profile,*steamAccount;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
-@property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
 @property(nonatomic,strong) NSURL *scopedArchive;
@@ -347,17 +346,14 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";heading.font=[UIFont boldSystemFontOfSize:30];
     self.installation=[UILabel new];self.installation.text=@"No game installed";self.installation.textColor=UIColor.secondaryLabelColor;
     self.profile=[UILabel new];self.profile.textColor=UIColor.secondaryLabelColor;
+    self.steamAccount=[UILabel new];self.steamAccount.textColor=UIColor.secondaryLabelColor;
+    self.steamAccount.numberOfLines=0;self.steamAccount.text=@"Steam: Signed out";
     self.account=[self field:@"Steam account name" secure:NO];self.password=[self field:@"Steam password" secure:YES];
     self.branch=[self field:@"Branch: public, beta name or ? to list" secure:NO];self.branch.text=@"?";
     self.manifest=[self field:@"Exact manifest ID (optional)" secure:NO];
     self.beta=[self field:@"Private beta password (optional)" secure:YES];
-    self.download=[self button:@"Sign in & install game" action:@selector(downloadPressed)];
-    self.remember=[UISwitch new];
-    UILabel *rememberLabel=[UILabel new];rememberLabel.text=@"Remember Steam session in Keychain";
-    UIStackView *rememberRow=[[UIStackView alloc]initWithArrangedSubviews:@[rememberLabel,self.remember]];
-    rememberRow.axis=UILayoutConstraintAxisHorizontal;rememberRow.spacing=8;
-    self.saved=[self button:@"Use saved Steam session" action:@selector(savedPressed)];
-    self.forget=[self button:@"Forget saved Steam session" action:@selector(forgetPressed)];
+    self.download=[self button:@"Install from Steam" action:@selector(downloadPressed)];
+    self.forget=[self button:@"Sign out of Steam" action:@selector(forgetPressed)];
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
@@ -382,14 +378,14 @@ static void forward(id service,SEL selector,UIApplication *application) {
     playStyle.title=@"Play installed game";
     self.play.configuration=playStyle;
     UIButtonConfiguration *downloadStyle=UIButtonConfiguration.filledButtonConfiguration;
-    downloadStyle.title=@"Sign in & install game";
+    downloadStyle.title=@"Install from Steam";
     self.download.configuration=downloadStyle;
 
     UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods",@"Tools"]];
     navigation.selectedSegmentIndex=0;
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
-    UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
+    UIStackView *installSection=[self section:@[self.importGame,self.steamAccount,self.account,self.password,self.branch,self.manifest,self.beta,self.download,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.importSnapshot,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus,nexusWebsite]];
     UIStackView *toolsSection=[self section:@[self.launchOptions,self.files,self.diagnostics,about]];
@@ -403,7 +399,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSLayoutConstraint *preferredWidth=[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48];
     preferredWidth.priority=UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
-    self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
+    self.download.enabled=self.play.enabled=self.cancel.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
     self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
     self.timer=[NSTimer timerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
@@ -457,7 +453,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSString *profile=[state[@"Profile"] isKindOfClass:NSString.class]?state[@"Profile"]:nil;
     self.installation.text=installed?[NSString stringWithFormat:@"Installed: %@",installed]:@"No game installed";
     self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
-    self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
+    NSString *steamAccount=[state[@"SteamAccount"] isKindOfClass:NSString.class]?state[@"SteamAccount"]:nil;
+    self.steamAccount.text=steamAccount?[NSString stringWithFormat:@"Steam: %@%@",steamAccount,
+        [state[@"SteamSessionTemporary"] boolValue]?@" (saved for this launch only)":@""]:@"Steam: Signed out";
+    self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
+    self.forget.enabled=idle && steamAccount!=nil;
     self.play.enabled=idle && installed!=nil && profile!=nil;
     self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
@@ -467,7 +467,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
     self.progress.progress=total>0?done/total:0;
-    if(total>0) message=[message stringByAppendingFormat:@"\n%.1f / %.1f MiB",done/1048576,total/1048576];
+    if(total>0 && [stage isEqual:@"cloud"]){
+        NSString *transferred=[NSByteCountFormatter stringFromByteCount:[state[@"Completed"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+        NSString *expected=[NSByteCountFormatter stringFromByteCount:[state[@"Total"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+        message=[message stringByAppendingFormat:@"\n%@ / %@",transferred,expected];
+    }else if(total>0) message=[message stringByAppendingFormat:@"\n%.1f / %.1f MiB",done/1048576,total/1048576];
     else if(done>0) message=[message stringByAppendingFormat:@"\n%.1f MiB imported",done/1048576];
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];
@@ -665,11 +669,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [self showError:@"Unable to open the selected archive."];
     }
 }
-- (void)downloadPressed { [self startDownload:NO]; }
-- (void)savedPressed { [self startDownload:YES]; }
-- (void)forgetPressed { if(forgetSession()!=0)[self showError:@"Unable to clear saved Steam session."]; }
-- (void)startDownload:(BOOL)saved {
-    NSDictionary *request=@{@"Username":self.account.text?:@"",@"Password":self.password.text?:@"",@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@"",@"Remember":@(self.remember.on),@"Saved":@(saved)};
+- (void)forgetPressed {
+    if(forgetSession()!=0){[self showError:@"Unable to clear saved Steam session."];return;}
+    self.account.text=@"";self.password.text=@"";
+}
+- (void)downloadPressed {
+    NSDictionary *request=@{@"Username":self.account.text?:@"",@"Password":self.password.text?:@"",@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@""};
     NSData *data=[NSJSONSerialization dataWithJSONObject:request options:0 error:nil];NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
     self.password.text=@"";self.beta.text=@"";[self.view endEditing:YES];int rc=beginDownload(json.UTF8String);
     if(rc==-2)[self showError:@"Enter your Steam account name and password."];

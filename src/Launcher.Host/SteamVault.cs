@@ -11,9 +11,24 @@ internal static class SteamVault
     static extern int Read([Out] byte[] buffer,int capacity);
     [DllImport("__Internal",EntryPoint="sts2_vault_clear")]
     static extern int ClearNative();
-    public static SteamIdentity? Load() => KeychainJson.Load<SteamIdentity>(Read);
+    public static SteamIdentity? Load()
+    {
+        const int itemNotFound = -25300;
+        var identity = KeychainJson.Load<SteamIdentity>((buffer, capacity) =>
+        {
+            var count = Read(buffer, capacity);
+            if (count < 0 && count != itemNotFound) throw new IOException($"Steam login storage read failed ({count}).");
+            return count;
+        });
+        return identity is not null && !string.IsNullOrWhiteSpace(identity.AccountName) &&
+            !string.IsNullOrWhiteSpace(identity.RefreshToken) ? identity : null;
+    }
     public static void Save(SteamIdentity identity) => KeychainJson.Save(identity, Write);
-    public static int Clear()=>ClearNative();
+    public static void Clear()
+    {
+        var result = ClearNative();
+        if (result != 0) throw new IOException($"Steam login storage deletion failed ({result}).");
+    }
 }
 
 internal static class KeychainJson
