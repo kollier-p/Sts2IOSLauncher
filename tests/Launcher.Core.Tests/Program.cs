@@ -5,6 +5,7 @@ using System.Text;
 using System.Security.Cryptography;
 using SharpCompress.Common;
 using SharpCompress.Compressors.BZip2;
+using SharpCompress.Compressors.LZMA;
 using SharpCompress.Writers;
 using SharpCompress.Writers.SevenZip;
 
@@ -180,6 +181,12 @@ try
         TarFile.CreateFromDirectory(archiveInput, bzip, includeBaseDirectory: true);
     var bzipImport = ArchiveImport.ImportAsync(store, bzipPath, null, CancellationToken.None).GetAwaiter().GetResult();
     Assert(bzipImport.DisplayName() == "Bzip backup" && store.VerifyForLaunch().Receipt == bzipImport, "Import a bzip2-compressed TAR");
+    var lzipPath = Path.Combine(root, "Lzip backup.tar.lz");
+    using (var target = File.Create(lzipPath))
+    using (var lzip = LZipStream.Create(target, SharpCompress.Compressors.CompressionMode.Compress))
+        TarFile.CreateFromDirectory(archiveInput, lzip, includeBaseDirectory: true);
+    var lzipImport = ArchiveImport.ImportAsync(store, lzipPath, null, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(lzipImport.DisplayName() == "Lzip backup" && store.VerifyForLaunch().Receipt == lzipImport, "Import an lzip-compressed TAR");
     var sevenZipPath = Path.Combine(root, "Game archive.7z");
     using (var target = File.Create(sevenZipPath))
     using (var writer = WriterFactory.OpenWriter(target, ArchiveType.SevenZip, new SevenZipWriterOptions(CompressionType.LZMA2)))
@@ -339,6 +346,12 @@ try
     Assert(automaticCalls.SequenceEqual(new[] { false }), "A successful upload clears the previous session marker");
     var modsRoot = Path.Combine(root, "mod-profile", "mods");
     var mods = new ModLibrary(modsRoot);
+    var rarPath = Path.Combine(root, "Fixture mod.rar");
+    File.WriteAllBytes(rarPath, Convert.FromBase64String(
+        "UmFyIRoHAM+QcwAADQAAAAAAAAAT73QAgDkAEwAAABMAAAAC3gtSQQAAAAAUMBkAIAAAAGZpeHR1cmUvbW9kX21hbmlmZXN0Lmpzb257ImlkIjoiRml4dHVyZVJhciJ9" +
+        "V+R0AIA2AAQAAAAEAAAAAvrXegUAAAAAFDAWACAAAABmaXh0dXJlL0ZpeHR1cmVSYXIucGNrR0RQQwSwewAABwA="));
+    using (var rarMod = mods.PrepareArchiveAsync(rarPath, CancellationToken.None).GetAwaiter().GetResult())
+        Assert(rarMod.ModuleIds.SequenceEqual(new[] { "FixtureRar" }), "An ordinary non-solid RAR uses the indexed entry reader");
     string CreateModZip(string name, string id, string description)
     {
         var path = Path.Combine(root, name + ".zip");
@@ -352,6 +365,9 @@ try
     using var firstMod = mods.PrepareArchiveAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
     var installedMod = mods.Install(firstMod, replace: false, CancellationToken.None);
     Assert(File.Exists(Path.Combine(modsRoot, installedMod.Key, "module", "TestMod.json")), "Legacy mod manifests get their expected filename");
+    File.WriteAllText(Path.Combine(modsRoot, installedMod.Key, ".sts2-mod-install"),
+        System.Text.Json.JsonSerializer.Serialize(installedMod with { Modules = null }));
+    Assert(mods.Modules(installedMod.Key).Single().Module.Id == "TestMod", "Existing mod receipts gain module controls in place");
     mods.SetLoadingPaused(true);
     var pausedRoot = new ModLibrary(modsRoot).RuntimeDirectory();
     Assert(pausedRoot != modsRoot && !Directory.EnumerateFileSystemEntries(pausedRoot).Any() && mods.List().Single().Enabled,
@@ -412,6 +428,8 @@ try
         NexusMods.ParseNxm("nxm://other/mods/42/files/37?key=public%2Bkey&expires=1234") is null,
         "Nexus lookup and download links are scoped to the game and service");
     var nexusMod = nexus.SearchAsync("https://www.nexusmods.com/slaythespire2/mods/42", CancellationToken.None).GetAwaiter().GetResult().Single();
+    Assert(nexus.SearchAsync("Older", CancellationToken.None).GetAwaiter().GetResult().Single().Id == 43,
+        "Nexus search finds mods outside the current feeds using recently updated metadata");
     var nexusFile = nexus.FilesAsync(nexusMod.Id, CancellationToken.None).GetAwaiter().GetResult().Single();
     var nexusLink = NexusMods.ParseNxm("nxm://slaythespire2/mods/42/files/37?key=public%2Bkey&expires=1234")!;
     var nexusOutput = Path.Combine(root, "nexus-fixture.zip");

@@ -29,7 +29,7 @@ public static class Entry
     static InstallReceipt? profileVersion;
     static State state = new("idle", "No game installed");
 
-    sealed record Choice(string Value, string Title, string Detail);
+    sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null);
     sealed record State(string Stage, string Message, long Completed = 0, long Total = 0, double Speed = 0,
         string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0,
         string? Installed = null, string? Profile = null);
@@ -791,7 +791,7 @@ public static class Entry
     static async Task<State> BrowseWorkshopAsync(PayloadStore _, CancellationToken ct)
     {
         var action = await Ask("workshop-home", "Steam Workshop", ct,
-            [new("popular", "Popular", "Browse the past week"),
+            [new("popular", "Popular", "Choose a time range"),
              new("latest", "New releases", "Browse recently published items"),
              new("updated", "Recent updates", "Browse recently updated items"),
              new("subscribed", "Most subscribed", "Browse by subscriptions"),
@@ -816,13 +816,23 @@ public static class Entry
             "subscribed" => WorkshopSort.Subscribed,
             _ => WorkshopSort.Popular
         };
+        var days = 7;
+        if (action == "popular")
+        {
+            var range = await Ask("workshop-range", "Popular Workshop items", ct,
+                [new("7", "Past week", ""), new("30", "Past 30 days", ""), new("90", "Past 3 months", ""),
+                 new("180", "Past 6 months", ""), new("365", "Past year", ""), new("-1", "All time", "")]);
+            if (!int.TryParse(range, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out days))
+                return new("error", "Choose a Workshop time range.");
+        }
         var page = 1;
         while (true)
         {
             Publish(new("mods", "Loading Steam Workshop…"));
-            var results = await workshop.BrowseAsync(sort, page, query, ct);
+            var results = await workshop.BrowseAsync(sort, page, query, days, ct);
             if (results.Items.Count == 0) return new("idle", "Steam Workshop returned no matching items.");
-            var choices = results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary)).ToList();
+            var choices = results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary,
+                item.Thumbnail?.AbsoluteUri)).ToList();
             if (results.Index > 1) choices.Add(new("previous", "Previous page", ""));
             if (results.Index < results.Pages) choices.Add(new("next", "Next page", ""));
             var selection = await Ask("workshop-page", $"Workshop · Page {results.Index} of {results.Pages}", ct, choices.ToArray());

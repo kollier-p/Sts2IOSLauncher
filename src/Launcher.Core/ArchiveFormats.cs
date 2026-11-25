@@ -4,12 +4,13 @@ using SharpCompress.Archives;
 using SharpCompress.Archives.SevenZip;
 using SharpCompress.Common;
 using SharpCompress.Compressors.BZip2;
+using SharpCompress.Compressors.LZMA;
 using SharpCompress.Compressors.Xz;
 using SharpCompress.Compressors.ZStandard;
 
 namespace Launcher.Core;
 
-internal enum ArchiveFormat { Zip, Tar, TarGzip, TarBzip2, TarXz, TarZstd, Rar, SevenZip }
+internal enum ArchiveFormat { Zip, Tar, TarGzip, TarBzip2, TarXz, TarZstd, TarLzip, Rar, SevenZip }
 
 internal static class ArchiveFormats
 {
@@ -24,6 +25,7 @@ internal static class ArchiveFormats
         if (header.StartsWith("PK\x03\x04"u8) || header.StartsWith("PK\x05\x06"u8)) return ArchiveFormat.Zip;
         if (header.StartsWith(new byte[] { 0x1f, 0x8b })) return ArchiveFormat.TarGzip;
         if (header.StartsWith("BZh"u8)) return ArchiveFormat.TarBzip2;
+        if (header.StartsWith("LZIP"u8)) return ArchiveFormat.TarLzip;
         if (header.StartsWith(new byte[] { 0xfd, 0x37, 0x7a, 0x58, 0x5a, 0 })) return ArchiveFormat.TarXz;
         if (header.StartsWith(new byte[] { 0x28, 0xb5, 0x2f, 0xfd })) return ArchiveFormat.TarZstd;
         if (header.StartsWith("Rar!\x1a\x07"u8)) return ArchiveFormat.Rar;
@@ -58,6 +60,8 @@ internal static class ArchiveFormats
                 decompressConcatenated: true, leaveOpen: true),
             ArchiveFormat.TarXz => new XZStream(file),
             ArchiveFormat.TarZstd => new DecompressionStream(file),
+            ArchiveFormat.TarLzip => new BufferedStream(
+                LZipStream.Create(file, SharpCompress.Compressors.CompressionMode.Decompress, leaveOpen: true), 65_536),
             _ => throw new NotSupportedException("Unsupported archive format.")
         };
         using var reader = new TarReader(compressed ?? file);
@@ -71,6 +75,19 @@ internal static class ArchiveFormats
             var regular = entry.EntryType is TarEntryType.RegularFile or TarEntryType.V7RegularFile;
             await visit(Payload.Normalize(name), entry.Length, regular, () => entry.DataStream ?? Stream.Null);
         }
+        if (format == ArchiveFormat.TarLzip)
+        {
+            // Consume TAR padding so the decoder can verify the lzip footer.
+            var buffer = new byte[65_536];
+            long padding = 0;
+            int read;
+            while ((read = await compressed!.ReadAsync(buffer, ct)) != 0)
+            {
+                padding += read;
+                if (padding > 16 * 1024 * 1024 || buffer.AsSpan(0, read).ContainsAnyExcept((byte)0))
+                    throw new InvalidDataException("Unexpected data after the end of the lzip-compressed TAR.");
+            }
+        }
     }
 
     static async Task ReadIndexedAsync(Stream file, ArchiveFormat format,
@@ -80,25 +97,38 @@ internal static class ArchiveFormats
         var expected = format == ArchiveFormat.Rar ? ArchiveType.Rar : ArchiveType.SevenZip;
         if (archive.Type != expected || archive.IsEncrypted || !archive.IsComplete)
             throw new InvalidDataException("The archive is incomplete, encrypted, or has an unexpected format.");
+        if (format == ArchiveFormat.Rar && !archive.IsSolid)
+        {
+            var entries = 0;
+            foreach (var entry in archive.Entries)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (++entries > EntryLimit) throw new InvalidDataException("The archive contains too many entries.");
+                await VisitIndexedAsync(entry, format, entry.OpenEntryStream, visit);
+            }
+            return;
+        }
         using var reader = archive.ExtractAllEntries();
         var count = 0;
         while (reader.MoveToNextEntry())
         {
             ct.ThrowIfCancellationRequested();
             if (++count > EntryLimit) throw new InvalidDataException("The archive contains too many entries.");
-            var entry = reader.Entry;
-            if (entry.IsDirectory) continue;
-            var attributes = unchecked((uint)(entry.Attrib ?? 0));
-            var mode = format == ArchiveFormat.Rar ? attributes & 0xf000 : (attributes >> 16) & 0xf000;
-            var regular = entry.LinkTarget is null or "" && !entry.IsEncrypted && !entry.IsSplitAfter &&
-                (attributes & (uint)FileAttributes.ReparsePoint) == 0 && mode is 0 or 0x8000 &&
-                entry is not SevenZipArchiveEntry { IsAnti: true };
-            Stream? opened = null;
-            try
-            {
-                await visit(Payload.Normalize(entry.Key ?? ""), entry.Size, regular, () => opened = reader.OpenEntryStream());
-            }
-            finally { opened?.Dispose(); }
+            await VisitIndexedAsync(reader.Entry, format, reader.OpenEntryStream, visit);
         }
+    }
+
+    static async Task VisitIndexedAsync(IEntry entry, ArchiveFormat format, Func<Stream> open,
+        Func<string, long, bool, Func<Stream>, Task> visit)
+    {
+        if (entry.IsDirectory) return;
+        var attributes = unchecked((uint)(entry.Attrib ?? 0));
+        var mode = format == ArchiveFormat.Rar ? attributes & 0xf000 : (attributes >> 16) & 0xf000;
+        var regular = entry.LinkTarget is null or "" && !entry.IsEncrypted && !entry.IsSplitAfter &&
+            (attributes & (uint)FileAttributes.ReparsePoint) == 0 && mode is 0 or 0x8000 &&
+            entry is not SevenZipArchiveEntry { IsAnti: true };
+        Stream? opened = null;
+        try { await visit(Payload.Normalize(entry.Key ?? ""), entry.Size, regular, () => opened = open()); }
+        finally { opened?.Dispose(); }
     }
 }

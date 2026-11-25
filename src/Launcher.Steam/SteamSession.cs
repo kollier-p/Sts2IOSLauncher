@@ -53,9 +53,9 @@ public sealed class SteamSession : IAsyncDisposable
     public async Task<IReadOnlyList<GameBranch>> ListBranchesAsync(CancellationToken ct)
     {
         RequireSession(); ct.ThrowIfCancellationRequested();
-        var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null);
+        var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null).ToTask().WaitAsync(ct);
         tokens.AppTokens.TryGetValue(Payload.AppId, out var token);
-        var info = await Apps.PICSGetProductInfo(new SteamApps.PICSRequest(Payload.AppId, token), null);
+        var info = await Apps.PICSGetProductInfo(new SteamApps.PICSRequest(Payload.AppId, token), null).ToTask().WaitAsync(ct);
         ct.ThrowIfCancellationRequested();
         var product = info.Results?.FirstOrDefault(x => x.Apps.ContainsKey(Payload.AppId))
             ?? throw new IOException("Steam did not return game product information.");
@@ -75,9 +75,9 @@ public sealed class SteamSession : IAsyncDisposable
     public async Task<ulong> ResolveManifestAsync(string branch, CancellationToken ct, string? betaPassword = null)
     {
         RequireSession(); ct.ThrowIfCancellationRequested();
-        var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null);
+        var tokens = await Apps.PICSGetAccessTokens(Payload.AppId, null).ToTask().WaitAsync(ct);
         tokens.AppTokens.TryGetValue(Payload.AppId, out var token);
-        var info = await Apps.PICSGetProductInfo(new SteamApps.PICSRequest(Payload.AppId, token), null);
+        var info = await Apps.PICSGetProductInfo(new SteamApps.PICSRequest(Payload.AppId, token), null).ToTask().WaitAsync(ct);
         ct.ThrowIfCancellationRequested();
         var product = info.Results?.FirstOrDefault(x => x.Apps.ContainsKey(Payload.AppId));
         if (product is null) throw new IOException("Steam did not return game product information.");
@@ -85,11 +85,11 @@ public sealed class SteamSession : IAsyncDisposable
         if (ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id != 0) return id;
         if (string.IsNullOrEmpty(betaPassword) || string.Equals(branch, "public", StringComparison.OrdinalIgnoreCase))
             throw new IOException("No accessible manifest for requested branch; no fallback attempted.");
-        var unlock = await Apps.CheckAppBetaPassword(Payload.AppId, betaPassword);
+        var unlock = await Apps.CheckAppBetaPassword(Payload.AppId, betaPassword).ToTask().WaitAsync(ct);
         ct.ThrowIfCancellationRequested();
         if (unlock.Result != EResult.OK || !unlock.BetaPasswords.TryGetValue(branch, out var hash))
             throw new UnauthorizedAccessException("Steam rejected the beta branch password.");
-        var privateInfo = await Apps.PICSGetPrivateBeta(Payload.AppId, token, branch, hash);
+        var privateInfo = await Apps.PICSGetPrivateBeta(Payload.AppId, token, branch, hash).ToTask().WaitAsync(ct);
         ct.ThrowIfCancellationRequested();
         if (privateInfo.Result != EResult.OK) throw new UnauthorizedAccessException("Steam rejected private branch access.");
         value = privateInfo.DepotSection[Payload.WindowsDepot.ToString(CultureInfo.InvariantCulture)]["manifests"][branch]["gid"].Value;
@@ -104,11 +104,11 @@ public sealed class SteamSession : IAsyncDisposable
         var manifestId = exactManifest ?? await ResolveManifestAsync(branch, ct, betaPassword);
         if (exactManifest.HasValue && !string.IsNullOrEmpty(betaPassword) && !string.Equals(branch, "public", StringComparison.OrdinalIgnoreCase))
             await ResolveManifestAsync(branch, ct, betaPassword);
-        var ticket = await Apps.GetAppOwnershipTicket(Payload.AppId);
+        var ticket = await Apps.GetAppOwnershipTicket(Payload.AppId).ToTask().WaitAsync(ct);
         if (ticket.Result != EResult.OK || ticket.Ticket.Length == 0) throw new UnauthorizedAccessException("Steam did not authorize access to the game.");
-        var key = await Apps.GetDepotDecryptionKey(Payload.WindowsDepot, Payload.AppId);
+        var key = await Apps.GetDepotDecryptionKey(Payload.WindowsDepot, Payload.AppId).ToTask().WaitAsync(ct);
         if (key.Result != EResult.OK || key.DepotKey.Length == 0) throw new UnauthorizedAccessException("Steam did not authorize access to the Windows depot.");
-        var code = await Content.GetManifestRequestCode(Payload.WindowsDepot, Payload.AppId, manifestId, branch);
+        var code = await Content.GetManifestRequestCode(Payload.WindowsDepot, Payload.AppId, manifestId, branch).WaitAsync(ct);
         if (code == 0) throw new UnauthorizedAccessException("Steam did not grant a manifest request code.");
         var transfer = await SteamDepotTransfer.OpenAsync(client, Content, Payload.WindowsDepot, key.DepotKey, ct);
         var manifest = await transfer.ManifestAsync(manifestId, code, ct);

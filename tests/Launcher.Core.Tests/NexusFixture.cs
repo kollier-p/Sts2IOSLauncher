@@ -26,6 +26,9 @@ internal sealed class NexusFixture : HttpMessageHandler
         {
             "validate.json" => """{"name":"fixture"}""",
             "42.json" => """{"mod_id":42,"name":"Fixture","version":"1.0","summary":"Test mod"}""",
+            "43.json" => """{"mod_id":43,"name":"Older fixture","version":"1.1","summary":"Updated test mod"}""",
+            "trending.json" or "latest_added.json" or "latest_updated.json" => "[]",
+            "updated.json" => """[{"mod_id":43,"latest_file_update":1700000000}]""",
             "files.json" => """{"files":[{"file_id":37,"name":"Fixture.zip","version":"1.1","is_primary":true}]}""",
             "download_link.json" when uri.Query == "?key=public%2Bkey&expires=1234" =>
                 """[{"URI":"https://mirror.example/forbidden"},{"URI":"https://cdn.nexusmods.com/mods/fixture.zip"}]""",

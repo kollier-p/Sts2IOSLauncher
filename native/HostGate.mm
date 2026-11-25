@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/runtime.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -26,10 +27,12 @@ static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, bro
     browseLaunchOptions, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
-@interface LauncherChoices : UITableViewController
+@interface LauncherChoices : UITableViewController<NSURLSessionTaskDelegate>
 @property(nonatomic,copy) NSArray<NSDictionary *> *choices;
 @property(nonatomic,copy) void (^selectValue)(NSString *value);
 @property(nonatomic,copy) void (^cancelSelection)(void);
+@property(nonatomic,strong) NSURLSession *imageSession;
+@property(nonatomic,strong) NSCache<NSURL *,UIImage *> *images;
 @end
 
 @implementation LauncherChoices
@@ -40,6 +43,21 @@ static Status copyStatus;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
         target:self action:@selector(cancelPressed)];
 }
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [self.imageSession invalidateAndCancel];
+    self.imageSession=nil;
+}
+static BOOL workshopImageURL(NSURL *url) {
+    if(![url.scheme.lowercaseString isEqualToString:@"https"] || url.user.length || url.password.length ||
+        (url.port && url.port.integerValue!=443))return NO;
+    NSString *host=url.host.lowercaseString;
+    return [host hasSuffix:@".steamusercontent.com"] || [host hasSuffix:@".steamstatic.com"] || [host hasSuffix:@".akamaihd.net"];
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+    newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))completionHandler {
+    completionHandler(workshopImageURL(request.URL)?request:nil);
+}
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.choices.count;
 }
@@ -48,9 +66,48 @@ static Status copyStatus;
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Choice"];
     NSDictionary *choice = self.choices[indexPath.row];
     cell.textLabel.text = choice[@"Title"];
+    cell.textLabel.numberOfLines=2;
     cell.detailTextLabel.text = choice[@"Detail"];
     cell.detailTextLabel.numberOfLines=0;
+    cell.imageView.image=nil;
+    NSString *thumb=[choice[@"Thumbnail"] isKindOfClass:NSString.class]?choice[@"Thumbnail"]:nil;
+    NSURL *imageURL=thumb?[NSURL URLWithString:thumb]:nil;
+    if(workshopImageURL(imageURL)) [self loadThumbnail:imageURL at:indexPath in:cell];
     return cell;
+}
+- (void)loadThumbnail:(NSURL *)url at:(NSIndexPath *)indexPath in:(UITableViewCell *)cell {
+    if(!self.images){self.images=[NSCache new];self.images.countLimit=64;}
+    UIImage *cached=[self.images objectForKey:url];
+    if(cached){cell.imageView.image=cached;return;}
+    cell.imageView.image=[UIImage systemImageNamed:@"photo"];
+    if(!self.imageSession){
+        NSURLSessionConfiguration *configuration=NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        configuration.HTTPShouldSetCookies=NO;
+        configuration.timeoutIntervalForRequest=15;
+        self.imageSession=[NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
+    }
+    __weak LauncherChoices *weakSelf=self;
+    [[self.imageSession dataTaskWithURL:url completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
+        if(error || data.length==0 || data.length>2*1024*1024 || !workshopImageURL(response.URL))return;
+        CGImageSourceRef source=CGImageSourceCreateWithData((__bridge CFDataRef)data,nullptr);
+        if(!source)return;
+        NSDictionary *options=@{(__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways:@YES,
+            (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize:@80};
+        CGImageRef preview=CGImageSourceCreateThumbnailAtIndex(source,0,(__bridge CFDictionaryRef)options);
+        CFRelease(source);
+        if(!preview)return;
+        UIImage *image=[UIImage imageWithCGImage:preview scale:2.0 orientation:UIImageOrientationUp];
+        CGImageRelease(preview);
+        dispatch_async(dispatch_get_main_queue(),^{
+            LauncherChoices *list=weakSelf;
+            [list.images setObject:image forKey:url];
+            UITableViewCell *visible=[list.tableView cellForRowAtIndexPath:indexPath];
+            if(visible){
+                visible.imageView.image=image;
+                [visible setNeedsLayout];
+            }
+        });
+    }] resume];
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     self.selectValue(self.choices[indexPath.row][@"Value"]);
@@ -150,8 +207,8 @@ __attribute__((visibility("default")))
 @property(nonatomic,assign) ArchivePicker archivePicker;
 @property(nonatomic,assign) int64_t shownPromptId;
 @property(nonatomic,assign) BOOL initialized, initializing;
-@property(nonatomic,assign) BOOL waitingForSteam;
-@property(nonatomic,assign) UIBackgroundTaskIdentifier steamBackgroundTask;
+@property(nonatomic,assign) BOOL canContinueInBackground;
+@property(nonatomic,assign) UIBackgroundTaskIdentifier launcherBackgroundTask;
 - (void)tick;
 @end
 static LauncherGate *gate;
@@ -198,10 +255,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.view.backgroundColor=UIColor.systemBackgroundColor;
-    self.steamBackgroundTask=UIBackgroundTaskInvalid;
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamDidEnterBackground:)
+    self.launcherBackgroundTask=UIBackgroundTaskInvalid;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(launcherDidEnterBackground:)
         name:UIApplicationDidEnterBackgroundNotification object:self.application];
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamDidBecomeActive:)
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(launcherDidBecomeActive:)
         name:UIApplicationDidBecomeActiveNotification object:self.application];
     UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";heading.font=[UIFont boldSystemFontOfSize:30];
     self.installation=[UILabel new];self.installation.text=@"No game installed";self.installation.textColor=UIColor.secondaryLabelColor;
@@ -230,6 +287,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.workshop=[self button:@"Steam Workshop" action:@selector(workshopPressed)];
     UIButton *workshopWebsite=[self button:@"Open Workshop in browser" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
+    UIButton *nexusWebsite=[self button:@"Open Nexus Mods in browser" action:@selector(nexusWebsitePressed)];
     self.diagnostics=[self button:@"View logs" action:@selector(logPressed)];
     self.files=[self button:@"Launcher files" action:@selector(filesPressed)];
     self.launchOptions=[self button:@"Game launch settings" action:@selector(launchOptionsPressed)];
@@ -249,7 +307,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.importSnapshot,self.steamCloud,self.webDav]];
-    UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
+    UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus,nexusWebsite]];
     UIStackView *toolsSection=[self section:@[self.launchOptions,self.files,self.diagnostics,about]];
     self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
     UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
@@ -264,7 +322,8 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
     self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
-    self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+    self.timer=[NSTimer timerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+    [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 - (void)tick {
     if(!self.initialized){
@@ -316,9 +375,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSDictionary *state=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if(![state isKindOfClass:NSDictionary.class])return;
     NSString *stage=state[@"Stage"];NSString *message=state[@"Message"];
-    self.waitingForSteam=[stage isEqual:@"auth"] || ([stage isEqual:@"prompt"] &&
+    self.canContinueInBackground=[@[@"auth",@"resolve",@"download",@"process",@"import",@"mods",@"cloud",@"webdav",@"snapshots"] containsObject:stage] ||
+        ([stage isEqual:@"prompt"] &&
         [@[@"confirm",@"code"] containsObject:state[@"Prompt"]]);
-    if(!self.waitingForSteam) [self endSteamBackgroundTask];
+    if(!self.canContinueInBackground) [self endLauncherBackgroundTask];
     BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];
     NSString *installed=[state[@"Installed"] isKindOfClass:NSString.class]?state[@"Installed"]:nil;
     NSString *profile=[state[@"Profile"] isKindOfClass:NSString.class]?state[@"Profile"]:nil;
@@ -339,28 +399,33 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];
     self.message.text=message;
-    if([stage isEqual:@"prompt"]){[self showPrompt:state];return;}
+    if([stage isEqual:@"prompt"]){
+        if(self.application.applicationState==UIApplicationStateActive)[self showPrompt:state];
+        return;
+    }
     self.shownPromptId=0;
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
     if([stage isEqual:@"ready"]){
+        if(self.application.applicationState!=UIApplicationStateActive)return;
         [self.timer invalidate];self.message.text=@"Starting Godot…";
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
         if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
         else{self.message.text=@"Godot startup failed. Restart the app.";}
     }
 }
-- (void)steamDidEnterBackground:(NSNotification *)notification {
-    if(!self.waitingForSteam || self.steamBackgroundTask!=UIBackgroundTaskInvalid) return;
+- (void)launcherDidEnterBackground:(NSNotification *)notification {
+    [self tick];
+    if(!self.canContinueInBackground || self.launcherBackgroundTask!=UIBackgroundTaskInvalid) return;
     __weak LauncherGate *weakGate=self;
-    self.steamBackgroundTask=[self.application beginBackgroundTaskWithName:@"Steam Guard" expirationHandler:^{
-        [weakGate endSteamBackgroundTask];
+    self.launcherBackgroundTask=[self.application beginBackgroundTaskWithName:@"Launcher operation" expirationHandler:^{
+        [weakGate endLauncherBackgroundTask];
     }];
 }
-- (void)steamDidBecomeActive:(NSNotification *)notification { [self endSteamBackgroundTask]; }
-- (void)endSteamBackgroundTask {
-    if(self.steamBackgroundTask==UIBackgroundTaskInvalid) return;
-    UIBackgroundTaskIdentifier task=self.steamBackgroundTask;
-    self.steamBackgroundTask=UIBackgroundTaskInvalid;
+- (void)launcherDidBecomeActive:(NSNotification *)notification { [self endLauncherBackgroundTask]; }
+- (void)endLauncherBackgroundTask {
+    if(self.launcherBackgroundTask==UIBackgroundTaskInvalid) return;
+    UIBackgroundTaskIdentifier task=self.launcherBackgroundTask;
+    self.launcherBackgroundTask=UIBackgroundTaskInvalid;
     [self.application endBackgroundTask:task];
 }
 - (void)showPrompt:(NSDictionary*)state {
@@ -422,6 +487,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
 - (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
+- (void)nexusWebsitePressed {
+    NSURL *url=[NSURL URLWithString:@"https://www.nexusmods.com/slaythespire2/mods/"];
+    [self.application openURL:url options:@{} completionHandler:nil];
+}
 - (void)launchOptionsPressed { if(browseLaunchOptions()!=0)[self showError:@"Another operation is active."]; }
 - (void)filesPressed {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
@@ -501,7 +570,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
     if(kind!=ArchivePicker::Snapshot){
         [types addObject:UTTypeArchive];
-        for(NSString *extension in @[@"7z",@"rar",@"tar",@"gz",@"tgz",@"bz2",@"tbz",@"tbz2",@"xz",@"txz",@"zst",@"tzst"]){
+        for(NSString *extension in @[@"7z",@"rar",@"tar",@"gz",@"tgz",@"bz2",@"tbz",@"tbz2",@"xz",@"txz",@"zst",@"tzst",@"lz"]){
             UTType *type=[UTType typeWithFilenameExtension:extension];
             if(type && ![types containsObject:type]) [types addObject:type];
         }

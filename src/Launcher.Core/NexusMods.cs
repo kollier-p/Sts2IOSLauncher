@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 
 namespace Launcher.Core;
@@ -62,6 +63,22 @@ public sealed class NexusMods(HttpClient http, string apiKey)
                 mods.TryAdd(mod.Id, mod);
             }
         }
+        if (query.Length != 0)
+        {
+            try
+            {
+                using var updates = await Get(Mods + "updated.json?period=1m", ct);
+                var candidates = updates.RootElement.EnumerateArray()
+                    .OrderByDescending(item => Timestamp(item, "latest_file_update"))
+                    .Select(item => Id(item, "mod_id")).Distinct().Where(candidate => !mods.ContainsKey(candidate)).Take(40);
+                foreach (var candidate in candidates)
+                {
+                    try { mods.Add(candidate, await LookupAsync(candidate, ct)); }
+                    catch (HttpRequestException error) when (error.StatusCode == HttpStatusCode.NotFound) { }
+                }
+            }
+            catch (HttpRequestException error) when (error.StatusCode == HttpStatusCode.TooManyRequests) { }
+        }
         return mods.Values.Where(mod => mod.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             mod.Summary.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
     }
@@ -121,6 +138,8 @@ public sealed class NexusMods(HttpClient http, string apiKey)
     static NexusMod ReadMod(JsonElement item) => new(Id(item, "mod_id"), Text(item, "name"), Text(item, "summary"), Text(item, "version"));
     static string Text(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
         ? value.GetString() ?? "" : "";
+    static ulong Timestamp(JsonElement item, string name) => item.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out var timestamp) ? timestamp : 0;
     static ulong Id(JsonElement item, string name)
     {
         var value = item.GetProperty(name);

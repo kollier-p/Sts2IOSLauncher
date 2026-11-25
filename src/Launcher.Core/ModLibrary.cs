@@ -442,17 +442,36 @@ public sealed class ModLibrary(string activeDirectory)
                 if (!File.Exists(receipt)) continue;
                 try
                 {
-                    using var stream = File.OpenRead(receipt);
-                    var mod = JsonSerializer.Deserialize<InstalledMod>(stream);
+                    InstalledMod? mod;
+                    using (var stream = File.OpenRead(receipt))
+                        mod = JsonSerializer.Deserialize<InstalledMod>(stream);
                     if (mod?.Key == name && mod.ModuleIds is { Length: > 0 } && mod.ModuleIds.All(ValidModuleName) &&
                         (mod.Modules is null || ValidModules(mod)) &&
                         (mod.Workshop is null || (mod.Workshop.ItemId != 0 && !string.IsNullOrWhiteSpace(mod.Workshop.Branch))))
-                        result.Add(mod with { Enabled = enabled });
+                    {
+                        var current = mod with { Enabled = enabled };
+                        result.Add(current.Modules is null ? TryUpgradeReceipt(entry, current) : current);
+                    }
                 }
                 catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException) { }
             }
         }
         return result.OrderBy(mod => mod.Label, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    static InstalledMod TryUpgradeReceipt(string path, InstalledMod original)
+    {
+        try
+        {
+            var modules = PrepareModules(path, CancellationToken.None, normalize: false);
+            if (!modules.Select(module => module.Id).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(original.ModuleIds))
+                return original;
+            var updated = original with { Modules = modules, ModuleIds = modules.Select(module => module.Id).ToArray() };
+            WriteReceipt(path, updated, update: true);
+            return updated;
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or BadImageFormatException)
+        { return original; }
     }
 
     string Location(string key, bool enabled)
@@ -488,18 +507,29 @@ public sealed class ModLibrary(string activeDirectory)
         CompletePendingPreset();
     }
 
-    static void WriteReceipt(string path, InstalledMod mod)
+    static void WriteReceipt(string path, InstalledMod mod, bool update = false)
     {
-        using var stream = new FileStream(Path.Combine(path, ReceiptFile), FileMode.CreateNew);
-        JsonSerializer.Serialize(stream, mod);
-        stream.Flush(true);
+        var destination = Payload.SafePath(path, ReceiptFile);
+        var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew))
+            {
+                JsonSerializer.Serialize(stream, mod);
+                stream.Flush(true);
+            }
+            File.Move(temporary, destination, overwrite: update);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    static ModModule[] PrepareModules(string stage, CancellationToken ct)
+    static ModModule[] PrepareModules(string stage, CancellationToken ct, bool normalize = true)
     {
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var modules = new List<ModModule>();
-        foreach (var manifest in Directory.GetFiles(stage, "*.json", SearchOption.AllDirectories))
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint,
+            MatchCasing = MatchCasing.CaseInsensitive };
+        foreach (var manifest in Directory.EnumerateFiles(stage, "*.json", options))
         {
             ct.ThrowIfCancellationRequested();
             var legacy = Path.GetFileName(manifest).Equals("mod_manifest.json", StringComparison.OrdinalIgnoreCase);
@@ -538,7 +568,7 @@ public sealed class ModLibrary(string activeDirectory)
                 if (!bytes.AsSpan().SequenceEqual("GDPC"u8)) throw new InvalidDataException("A mod resource pack is invalid.");
             }
             var normalized = Payload.SafePath(parent, id + ".json");
-            if (legacy && !normalized.Equals(manifest, StringComparison.OrdinalIgnoreCase))
+            if (normalize && legacy && !normalized.Equals(manifest, StringComparison.OrdinalIgnoreCase))
                 File.Move(manifest, normalized, overwrite: false);
             else
                 normalized = manifest;

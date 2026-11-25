@@ -8,7 +8,8 @@ using SteamKit2.CDN;
 
 namespace Launcher.Steam;
 
-internal sealed class SteamDepotTransfer(SteamClient client, SteamContent content, uint depot, Server[] servers, byte[] key)
+internal sealed class SteamDepotTransfer(SteamClient client, SteamContent content, uint depot,
+    (Server Server, Server? Proxy)[] routes, byte[] key)
 {
     readonly ConcurrentDictionary<string, SteamContent.CDNAuthToken> authTokens = new();
 
@@ -16,52 +17,66 @@ internal sealed class SteamDepotTransfer(SteamClient client, SteamContent conten
         byte[] key, CancellationToken ct)
     {
         var servers = (await content.GetServersForSteamPipe().WaitAsync(ct))
-            .Where(server => !server.UseAsProxy && !server.SteamChinaOnly && server.Host is not null &&
+            .Where(server => server.Host is not null && server.VHost is not null &&
                 (server.AllowedAppIds.Length == 0 || server.AllowedAppIds.Contains(Payload.AppId)))
-            .OrderBy(server => server.WeightedLoad).Take(8).ToArray();
-        if (servers.Length == 0) throw new IOException("No suitable Steam CDN servers.");
-        return new SteamDepotTransfer(client, content, depot, servers, key);
+            .OrderBy(server => server.WeightedLoad).ToArray();
+        var proxies = servers.Where(server => server.UseAsProxy && server.Protocol == Server.ConnectionProtocol.HTTPS &&
+            !string.IsNullOrEmpty(server.ProxyRequestPathTemplate)).ToArray();
+        var routes = new List<(Server Server, Server? Proxy)>();
+        foreach (var server in servers.Where(server => !server.UseAsProxy)
+            .OrderBy(server => server.Protocol == Server.ConnectionProtocol.HTTPS ? 0 : 1).Take(8))
+        {
+            var proxy = proxies.FirstOrDefault(proxy => proxy.Type is string type && !server.BypassProxiesOfType.Contains(type));
+            if (proxy is not null) routes.Add((server, proxy));
+            routes.Add((server, null));
+        }
+        if (routes.Count == 0) throw new IOException("No suitable Steam CDN servers.");
+        return new SteamDepotTransfer(client, content, depot, routes.ToArray(), key);
     }
 
     public async Task<DepotManifest> ManifestAsync(ulong id, ulong code, CancellationToken ct)
     {
         using var cdn = new Client(client);
-        var manifest = await FromCdn((server, token) =>
-            cdn.DownloadManifestAsync(depot, id, code, server, key, cdnAuthToken: token), ct);
+        var manifest = await FromCdn((server, proxy, token) =>
+            cdn.DownloadManifestAsync(depot, id, code, server, key, proxyServer: proxy, cdnAuthToken: token), ct, requireHttps: true);
         if (manifest.ManifestGID != id || manifest.DepotID != depot || manifest.FilenamesEncrypted || manifest.Files is null)
             throw new InvalidDataException("Unexpected or encrypted Steam manifest.");
         return manifest;
     }
 
-    async Task<T> FromCdn<T>(Func<Server, string?, Task<T>> action, CancellationToken ct)
+    async Task<T> FromCdn<T>(Func<Server, Server?, string?, Task<T>> action, CancellationToken ct, bool requireHttps = false)
     {
         Exception? last = null;
-        foreach (var server in servers)
+        foreach (var (server, proxy) in routes)
         {
             ct.ThrowIfCancellationRequested();
+            var secure = (proxy ?? server).Protocol == Server.ConnectionProtocol.HTTPS;
+            if (requireHttps && !secure) continue;
             try
             {
                 authTokens.TryGetValue(server.Host!, out var cached);
                 if (cached is not null && cached.Expiration <= DateTime.UtcNow) cached = null;
                 try
                 {
-                    var value = await action(server, cached?.Token);
+                    var value = await action(server, proxy, secure ? cached?.Token : null);
                     ct.ThrowIfCancellationRequested();
                     return value;
                 }
-                catch (SteamKitWebRequestException error) when (error.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+                catch (SteamKitWebRequestException error) when (secure &&
+                    error.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
                 {
                     var auth = await content.GetCDNAuthToken(Payload.AppId, depot, server.Host!).WaitAsync(ct);
                     if (auth.Result != EResult.OK || string.IsNullOrEmpty(auth.Token))
                         throw new UnauthorizedAccessException("Steam CDN authorization rejected.");
                     ct.ThrowIfCancellationRequested();
                     authTokens[server.Host!] = auth;
-                    var value = await action(server, auth.Token);
+                    var value = await action(server, proxy, auth.Token);
                     ct.ThrowIfCancellationRequested();
                     return value;
                 }
             }
-            catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or TimeoutException or UnauthorizedAccessException)
+            catch (Exception error) when (error is SteamKitWebRequestException or HttpRequestException or IOException or
+                InvalidDataException or TimeoutException or UnauthorizedAccessException)
             {
                 last = error;
             }
@@ -134,9 +149,9 @@ internal sealed class SteamDepotTransfer(SteamClient client, SteamContent conten
                 stream.SetLength(offset);
                 stream.Position = offset;
                 var data = new byte[chunkLength];
-                var size = await FromCdn(async (server, token) =>
+                var size = await FromCdn(async (server, proxy, token) =>
                 {
-                    var count = await cdn.DownloadDepotChunkAsync(depot, chunk, server, data, key, cdnAuthToken: token);
+                    var count = await cdn.DownloadDepotChunkAsync(depot, chunk, server, data, key, proxyServer: proxy, cdnAuthToken: token);
                     ChunkLayout.VerifyDownloaded(data, count, hash);
                     return count;
                 }, ct);

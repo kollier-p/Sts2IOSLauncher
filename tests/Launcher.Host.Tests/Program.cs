@@ -99,13 +99,14 @@ Check(WorkshopManifest.ResolveBranch(workshopBranches, "public-beta")?.Id == 101
 const string workshopJson = """
     {"queries":[{"queryKey":["workshop_browse",{"appid":2868840}],"state":{"data":{"eresult":1,"current_page":2,
     "total_pages":5,"results":[{"consumer_appid":2868840,"publishedfileid":"18446744073709551615",
-    "title":"Fixture & tools","short_description":"A Steam Workshop fixture"},
+    "title":"Fixture & tools","short_description":"A Steam Workshop fixture","preview_url":"https://images.steamusercontent.com/ugc/preview/"},
     {"consumer_appid":1,"publishedfileid":"2","title":"Another game"}]}}}]}
     """;
 var workshopSsr = JsonSerializer.Serialize(new { renderContext = new { queryData = workshopJson } });
 var workshopPage = WorkshopFiles.ParsePage($"""<script id="valve-ssr-data" type="application/json">{workshopSsr}</script>""");
 Check(workshopPage.Index == 2 && workshopPage.Pages == 5 && workshopPage.Items.Single().Id == ulong.MaxValue &&
-    workshopPage.Items[0].Title == "Fixture & tools", "Workshop browsing parses and scopes Steam's published page data");
+    workshopPage.Items[0].Title == "Fixture & tools" && workshopPage.Items[0].Thumbnail?.Host == "images.steamusercontent.com",
+    "Workshop browsing parses and scopes Steam's published text and thumbnails");
 var workshopGraph = new Dictionary<ulong, IReadOnlyList<ulong>> { [1] = [2, 3], [2] = [4], [3] = [4], [4] = [] };
 Task<IReadOnlyList<ulong>> Requirements(ulong id, CancellationToken _) => Task.FromResult(workshopGraph[id]);
 var missing = await WorkshopDependencyOrder.MissingAsync(1, new HashSet<ulong> { 3 }, Requirements, CancellationToken.None);

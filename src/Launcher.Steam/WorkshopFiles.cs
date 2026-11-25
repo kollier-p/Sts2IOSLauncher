@@ -6,7 +6,7 @@ using Launcher.Core;
 namespace Launcher.Steam;
 
 public sealed record WorkshopItem(ulong Id, string Title, Uri? Download, long? Size, ulong? Manifest, uint Updated);
-public sealed record WorkshopListing(ulong Id, string Title, string Summary);
+public sealed record WorkshopListing(ulong Id, string Title, string Summary, Uri? Thumbnail);
 public sealed record WorkshopPage(int Index, int Pages, IReadOnlyList<WorkshopListing> Items);
 public enum WorkshopSort { Popular, Latest, Updated, Subscribed }
 
@@ -15,9 +15,10 @@ public sealed class WorkshopFiles(HttpClient http)
     const string Details = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
     const string Community = "https://steamcommunity.com/workshop/browse/";
 
-    public async Task<WorkshopPage> BrowseAsync(WorkshopSort sort, int page, string search, CancellationToken ct)
+    public async Task<WorkshopPage> BrowseAsync(WorkshopSort sort, int page, string search, int days, CancellationToken ct)
     {
         if (page < 1 || search.Length > 128) throw new ArgumentException("Invalid Workshop page or search term.");
+        if (days is not (7 or 30 or 90 or 180 or 365 or -1)) throw new ArgumentOutOfRangeException(nameof(days));
         var order = sort switch
         {
             WorkshopSort.Popular => "trend",
@@ -26,7 +27,7 @@ public sealed class WorkshopFiles(HttpClient http)
             WorkshopSort.Subscribed => "totaluniquesubscribers",
             _ => throw new ArgumentOutOfRangeException(nameof(sort))
         };
-        var url = $"{Community}?appid={Payload.AppId}&section=readytouseitems&browsesort={order}&p={page}&searchtext={Uri.EscapeDataString(search)}";
+        var url = $"{Community}?appid={Payload.AppId}&section=readytouseitems&browsesort={order}&p={page}&days={days}&searchtext={Uri.EscapeDataString(search)}";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.ParseAdd("text/html");
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -72,8 +73,9 @@ public sealed class WorkshopFiles(HttpClient http)
                     id == 0 || !seen.Add(id)) continue;
                 var title = String(item, "title");
                 var summary = String(item, "short_description") ?? "";
+                var thumbnail = PublicTransferUri(String(item, "preview_url"));
                 items.Add(new(id, string.IsNullOrWhiteSpace(title) ? $"Workshop {id}" : title,
-                    new string(summary.Where(character => !char.IsControl(character)).Take(160).ToArray())));
+                    new string(summary.Where(character => !char.IsControl(character)).Take(160).ToArray()), thumbnail));
             }
             return new((int)index.Value, (int)total.Value, items);
         }
