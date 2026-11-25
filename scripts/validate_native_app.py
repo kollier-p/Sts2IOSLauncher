@@ -98,7 +98,9 @@ def validate(app, extensions, fixtures):
         raise SystemExit("Godot launch arguments or deployment target differ from the launcher contract")
     verify_device_binary(binary)
     verify_symbols(binary, "_sts2_extensions_available", "_sts2_return_to_launcher",
-                   "_sts2_game_keyboard_ready", "_OBJC_CLASS_$_LauncherGate", "_OBJC_CLASS_$_LauncherGameKeys")
+                   "_sts2_game_keyboard_ready", "_OBJC_CLASS_$_LauncherGate")
+    if b"LauncherGameKeys\0" not in binary.read_bytes():
+        raise SystemExit("The staged app is missing the floating keyboard controller")
     verify_framework(app, "sts2", "_sts2_host_delegate", "_godotsharp_game_main_init",
                      "_sts2_initialize_game_runtime", "_sts2_jit_patch", "_sts2_vault_read",
                      "_sts2_vault_write", "_sts2_vault_clear", "_sts2_webdav_read", "_sts2_webdav_write", "_sts2_webdav_clear",

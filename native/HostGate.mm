@@ -420,7 +420,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     Method method=class_getInstanceMethod(service,@selector(application:didFinishLaunchingWithOptions:));
     if(!method)return; // CI inspects the generated host for this symbol.
     godotLaunch=(BOOL(*)(id,SEL,UIApplication*,NSDictionary*))method_setImplementation(method,(IMP)delayedLaunch);
-    Method interruption=class_getInstanceMethod(service,@selector(onAudioInterruption:));
+    Method interruption=class_getInstanceMethod(service,NSSelectorFromString(@"onAudioInterruption:"));
     if(interruption)audioInterruption=(void(*)(id,SEL,NSNotification *))method_setImplementation(interruption,(IMP)forwardAudioInterruption);
     lifecycle=[NSMutableDictionary new];
     for(NSString *name in @[@"applicationDidBecomeActive:",@"applicationWillResignActive:",@"applicationDidEnterBackground:",@"applicationWillEnterForeground:",@"applicationDidReceiveMemoryWarning:",@"applicationWillTerminate:"]){
