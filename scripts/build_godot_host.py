@@ -52,7 +52,7 @@ def main():
     with dummy.open("a") as f:f.write('\n#include "HostGate.mm"\n')
     metadata=plistlib.loads(info.read_bytes())
     revision=subprocess.run(["git","-C",ROOT,"rev-parse","HEAD"],capture_output=True,text=True,check=False).stdout.strip()
-    metadata.update({"godot_cmdline":["--main-pack","user://StS2.pck"],"CFBundleDisplayName":"STS2 Launcher","UIFileSharingEnabled":True,"LSSupportsOpeningDocumentsInPlace":True,"NSLocalNetworkUsageDescription":"Find local multiplayer games.","STS2GitRevision":revision})
+    metadata.update({"godot_cmdline":["--main-pack","user://StS2.pck","--log-file","user://LauncherLogs/godot.log"],"CFBundleDisplayName":"STS2 Launcher","UIFileSharingEnabled":True,"LSSupportsOpeningDocumentsInPlace":True,"NSLocalNetworkUsageDescription":"Find local multiplayer games.","STS2GitRevision":revision})
     if args.extension_fixtures:
         metadata.update({"CFBundleDisplayName": "STS2 CI Fixture", "STS2ExtensionFixtures": True})
     info.write_bytes(plistlib.dumps(metadata))

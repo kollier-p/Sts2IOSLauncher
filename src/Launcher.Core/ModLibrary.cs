@@ -5,7 +5,10 @@ using System.Text.Json;
 namespace Launcher.Core;
 
 public sealed record WorkshopOrigin(ulong ItemId, string Branch, ulong? Manifest, uint Updated);
-public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled, WorkshopOrigin? Workshop = null);
+public sealed record ModModule(string Id, string Manifest, string Version, string Author, string[] Dependencies, string? MinimumGameVersion);
+public sealed record ModModuleState(ModModule Module, bool? Enabled);
+public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled, WorkshopOrigin? Workshop = null,
+    ModModule[]? Modules = null);
 
 public sealed class ModLibrary(string activeDirectory)
 {
@@ -13,18 +16,21 @@ public sealed class ModLibrary(string activeDirectory)
     readonly string active = Path.GetFullPath(activeDirectory);
     string Parent => Path.GetDirectoryName(active)!;
     string Disabled => Payload.SafePath(Parent, ".disabled-mods");
+    string PauseMarker => Payload.SafePath(Parent, ".mod-loading-paused");
 
     public sealed class PreparedImport : IDisposable
     {
-        internal PreparedImport(string directory, string label, string[] modules, WorkshopOrigin? workshop)
+        internal PreparedImport(string directory, string label, ModModule[] modules, WorkshopOrigin? workshop)
         {
             DirectoryPath = directory;
             Label = label;
-            ModuleIds = Array.AsReadOnly(modules);
+            ModuleIds = Array.AsReadOnly(modules.Select(module => module.Id).ToArray());
+            Modules = modules;
             Workshop = workshop;
         }
 
         internal string DirectoryPath { get; }
+        internal ModModule[] Modules { get; }
         public string Label { get; }
         public IReadOnlyList<string> ModuleIds { get; }
         public WorkshopOrigin? Workshop { get; }
@@ -40,6 +46,32 @@ public sealed class ModLibrary(string activeDirectory)
         using var operation = Lock();
         Recover();
         return ReadInstalled();
+    }
+
+    public bool LoadingPaused => File.Exists(PauseMarker);
+
+    public void SetLoadingPaused(bool paused)
+    {
+        using var operation = Lock();
+        if (!paused)
+        {
+            File.Delete(PauseMarker);
+            return;
+        }
+        using var marker = new FileStream(PauseMarker, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
+        marker.Flush(flushToDisk: true);
+    }
+
+    public string RuntimeDirectory()
+    {
+        using var operation = Lock();
+        Recover();
+        if (!LoadingPaused) return active;
+        var empty = Payload.SafePath(Parent, ".empty-runtime-mods");
+        Directory.CreateDirectory(empty);
+        if (Directory.EnumerateFileSystemEntries(empty).Any())
+            throw new InvalidDataException("The paused mod directory contains unexpected files.");
+        return empty;
     }
 
     public Task<PreparedImport> PrepareArchiveAsync(string source, CancellationToken ct, string? displayName = null,
@@ -79,7 +111,7 @@ public sealed class ModLibrary(string activeDirectory)
             }
             var modules = PrepareModules(stage, ct);
             var label = new string(displayName.Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
-            return new PreparedImport(stage, label.Length == 0 ? modules[0] : label, modules, workshop);
+            return new PreparedImport(stage, label.Length == 0 ? modules[0].Id : label, modules, workshop);
         }
         catch
         {
@@ -144,8 +176,15 @@ public sealed class ModLibrary(string activeDirectory)
         if (previous is not null && !replace) throw new InvalidOperationException("Confirm replacement of the installed mod.");
         var key = previous?.Key ?? Guid.NewGuid().ToString("N");
         var enabled = previous?.Enabled ?? true;
-        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled, import.Workshop);
+        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled, import.Workshop, import.Modules);
         var destination = Location(key, enabled);
+        if (previous?.Modules is { } previousModules)
+        {
+            var disabled = previousModules.Where(module => ModuleEnabled(destination, module) == false)
+                .Select(module => module.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var module in import.Modules.Where(module => disabled.Contains(module.Id)))
+                SetModuleEnabled(import.DirectoryPath, module, false);
+        }
         WriteReceipt(import.DirectoryPath, result);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         ct.ThrowIfCancellationRequested();
@@ -171,6 +210,59 @@ public sealed class ModLibrary(string activeDirectory)
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         Directory.Move(Location(key, current.Enabled), destination);
         return current with { Enabled = enabled };
+    }
+
+    public IReadOnlyList<ModModuleState> Modules(string key)
+    {
+        using var operation = Lock();
+        Recover();
+        var package = Get(key);
+        var root = Location(key, package.Enabled);
+        return package.Modules?.Select(module => new ModModuleState(module, ModuleEnabled(root, module))).ToArray() ?? [];
+    }
+
+    public IReadOnlySet<string> EnabledModuleIds()
+    {
+        using var operation = Lock();
+        Recover();
+        var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var package in ReadInstalled().Where(package => package.Enabled))
+        {
+            if (package.Modules is null) enabled.UnionWith(package.ModuleIds);
+            else
+            {
+                var root = Location(package.Key, true);
+                enabled.UnionWith(package.Modules.Where(module => ModuleEnabled(root, module) == true).Select(module => module.Id));
+            }
+        }
+        return enabled;
+    }
+
+    public void SetModuleEnabled(string key, string id, bool enabled)
+    {
+        using var operation = Lock();
+        Recover();
+        var package = Get(key);
+        var module = package.Modules?.SingleOrDefault(item => item.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException("The installed package does not describe this module.");
+        SetModuleEnabled(Location(key, package.Enabled), module, enabled);
+    }
+
+    static bool? ModuleEnabled(string root, ModModule module)
+    {
+        var manifest = Payload.SafePath(root, module.Manifest);
+        var disabled = Payload.SafePath(root, module.Manifest + ".disabled");
+        var enabled = File.Exists(manifest);
+        return enabled == File.Exists(disabled) ? null : enabled;
+    }
+
+    static void SetModuleEnabled(string root, ModModule module, bool enabled)
+    {
+        var current = ModuleEnabled(root, module) ?? throw new InvalidDataException($"Module {module.Id} has a missing or duplicate manifest.");
+        if (current == enabled) return;
+        var active = Payload.SafePath(root, module.Manifest);
+        var inactive = Payload.SafePath(root, module.Manifest + ".disabled");
+        File.Move(enabled ? inactive : active, enabled ? active : inactive);
     }
 
     public void Remove(string key)
@@ -228,6 +320,7 @@ public sealed class ModLibrary(string activeDirectory)
                     using var stream = File.OpenRead(receipt);
                     var mod = JsonSerializer.Deserialize<InstalledMod>(stream);
                     if (mod?.Key == name && mod.ModuleIds is { Length: > 0 } && mod.ModuleIds.All(ValidModuleName) &&
+                        (mod.Modules is null || ValidModules(mod)) &&
                         (mod.Workshop is null || (mod.Workshop.ItemId != 0 && !string.IsNullOrWhiteSpace(mod.Workshop.Branch))))
                         result.Add(mod with { Enabled = enabled });
                 }
@@ -276,9 +369,10 @@ public sealed class ModLibrary(string activeDirectory)
         stream.Flush(true);
     }
 
-    static string[] PrepareModules(string stage, CancellationToken ct)
+    static ModModule[] PrepareModules(string stage, CancellationToken ct)
     {
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var modules = new List<ModModule>();
         foreach (var manifest in Directory.GetFiles(stage, "*.json", SearchOption.AllDirectories))
         {
             ct.ThrowIfCancellationRequested();
@@ -320,9 +414,41 @@ public sealed class ModLibrary(string activeDirectory)
             var normalized = Payload.SafePath(parent, id + ".json");
             if (legacy && !normalized.Equals(manifest, StringComparison.OrdinalIgnoreCase))
                 File.Move(manifest, normalized, overwrite: false);
+            else
+                normalized = manifest;
+            var relative = Path.GetRelativePath(stage, normalized).Replace(Path.DirectorySeparatorChar, '/');
+            if (File.Exists(Payload.SafePath(stage, relative + ".disabled")))
+                throw new InvalidDataException("The mod package contains an existing disabled manifest.");
+            modules.Add(new(id, relative, Metadata(json, "version"), Metadata(json, "author"),
+                Dependencies(json), Metadata(json, "min_game_version", "minGameVersion")));
         }
         if (ids.Count == 0) throw new InvalidDataException("The package has no mod manifests with a managed DLL or resource pack.");
-        return ids.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        return modules.OrderBy(module => module.Id, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    static string[] Dependencies(JsonElement manifest)
+    {
+        if (!manifest.TryGetProperty("dependencies", out var value) || value.ValueKind != JsonValueKind.Array) return [];
+        return value.EnumerateArray().Select(entry => entry.ValueKind == JsonValueKind.String ? entry.GetString() :
+            entry.ValueKind == JsonValueKind.Object ? ManifestString(entry, "id", "mod_id", "modId", "ID") : null)
+            .OfType<string>().Where(ValidModuleName).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToArray();
+    }
+
+    static string Metadata(JsonElement manifest, params string[] keys)
+        => new((ManifestString(manifest, keys) ?? "").Where(character => !char.IsControl(character)).Take(128).ToArray());
+
+    static bool ValidModules(InstalledMod mod)
+    {
+        var modules = mod.Modules!;
+        if (modules.Length != mod.ModuleIds.Length ||
+            !modules.Select(module => module?.Id).SequenceEqual(mod.ModuleIds, StringComparer.OrdinalIgnoreCase)) return false;
+        try
+        {
+            return modules.All(module => module.Manifest is not null && module.Dependencies is not null &&
+                module.Manifest.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
+                Payload.Normalize(module.Manifest) == module.Manifest && module.Dependencies.All(ValidModuleName));
+        }
+        catch (InvalidDataException) { return false; }
     }
 
     static JsonDocument? ReadManifest(string path, bool required)

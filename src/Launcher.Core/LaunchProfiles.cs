@@ -4,7 +4,7 @@ namespace Launcher.Core;
 
 public sealed record LaunchProfile(string Id, string Name, bool IsolateSaves, bool IsolateMods, string? PayloadId = null);
 
-public sealed record LaunchProfilePaths(string ModsDirectory, string? SaveDirectory, string? RelativeSavePath)
+public sealed record LaunchProfilePaths(string ModsDirectory, string? SaveDirectory, string? RelativeSavePath, bool ModsPaused = false)
 {
     public string GodotSavePath(params string?[] parts)
     {

@@ -99,6 +99,15 @@ var workshopSsr = JsonSerializer.Serialize(new { renderContext = new { queryData
 var workshopPage = WorkshopFiles.ParsePage($"""<script id="valve-ssr-data" type="application/json">{workshopSsr}</script>""");
 Check(workshopPage.Index == 2 && workshopPage.Pages == 5 && workshopPage.Items.Single().Id == ulong.MaxValue &&
     workshopPage.Items[0].Title == "Fixture & tools", "Workshop browsing parses and scopes Steam's published page data");
+var workshopGraph = new Dictionary<ulong, IReadOnlyList<ulong>> { [1] = [2, 3], [2] = [4], [3] = [4], [4] = [] };
+Task<IReadOnlyList<ulong>> Requirements(ulong id, CancellationToken _) => Task.FromResult(workshopGraph[id]);
+var missing = await WorkshopDependencyOrder.MissingAsync(1, new HashSet<ulong> { 3 }, Requirements, CancellationToken.None);
+Check(missing.SequenceEqual(new ulong[] { 4, 2 }), "Workshop installs shared prerequisites once, before dependent items");
+workshopGraph[4] = [1];
+var cycleRejected = false;
+try { await WorkshopDependencyOrder.MissingAsync(1, new HashSet<ulong>(), Requirements, CancellationToken.None); }
+catch (InvalidDataException) { cycleRejected = true; }
+Check(cycleRejected, "Workshop rejects cyclic dependency graphs");
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 

@@ -33,6 +33,8 @@ static Status copyStatus;
 @implementation LauncherChoices
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.tableView.rowHeight=UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight=56;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
         target:self action:@selector(cancelPressed)];
 }
@@ -45,6 +47,7 @@ static Status copyStatus;
     NSDictionary *choice = self.choices[indexPath.row];
     cell.textLabel.text = choice[@"Title"];
     cell.detailTextLabel.text = choice[@"Detail"];
+    cell.detailTextLabel.numberOfLines=0;
     return cell;
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -54,14 +57,15 @@ static Status copyStatus;
 @end
 
 @interface LauncherDiagnostics : UIViewController
-@property(nonatomic,copy) NSURL *logURL;
+@property(nonatomic,copy) NSURL *directory;
 @property(nonatomic,strong) UITextView *output;
+@property(nonatomic,strong) UISegmentedControl *source;
 @end
 
 @implementation LauncherDiagnostics
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title=@"Launcher log";
+    self.title=@"Logs";
     self.view.backgroundColor=UIColor.systemBackgroundColor;
     self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
         target:self action:@selector(closeLog)];
@@ -69,6 +73,10 @@ static Status copyStatus;
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(shareLog:)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(refreshLog)]
     ];
+    self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous"]];
+    self.source.selectedSegmentIndex=0;
+    [self.source addTarget:self action:@selector(refreshLog) forControlEvents:UIControlEventValueChanged];
+    self.navigationItem.titleView=self.source;
     self.output=[UITextView new];
     self.output.editable=NO;
     self.output.font=[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
@@ -84,7 +92,7 @@ static Status copyStatus;
     [self refreshLog];
 }
 - (void)refreshLog {
-    NSFileHandle *file=[NSFileHandle fileHandleForReadingFromURL:self.logURL error:nil];
+    NSFileHandle *file=[NSFileHandle fileHandleForReadingFromURL:[self logURL] error:nil];
     unsigned long long length=0;
     NSString *text=nil;
     if([file seekToEndReturningOffset:&length error:nil]){
@@ -102,12 +110,16 @@ static Status copyStatus;
         }
         [file closeAndReturnError:nil];
     }
-    self.output.text=text.length?text:@"No launcher log is available yet.";
+    self.output.text=text.length?text:@"No entries are available for this log.";
     self.navigationItem.rightBarButtonItems.firstObject.enabled=text.length>0;
     [self.output scrollRangeToVisible:NSMakeRange(self.output.text.length,0)];
 }
+- (NSURL *)logURL {
+    NSArray<NSString *> *sources=@[@"launcher.log",@"godot.log",@"godot.log.previous"];
+    return [self.directory URLByAppendingPathComponent:sources[self.source.selectedSegmentIndex]];
+}
 - (void)shareLog:(UIBarButtonItem *)sender {
-    UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[self.logURL] applicationActivities:nil];
+    UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[[self logURL]] applicationActivities:nil];
     share.popoverPresentationController.barButtonItem=sender;
     [self presentViewController:share animated:YES completion:nil];
 }
@@ -211,7 +223,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.workshop=[self button:@"Steam Workshop" action:@selector(workshopPressed)];
     UIButton *workshopWebsite=[self button:@"Open Workshop in browser" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
-    self.diagnostics=[self button:@"Launcher log" action:@selector(logPressed)];
+    self.diagnostics=[self button:@"View logs" action:@selector(logPressed)];
     self.files=[self button:@"Launcher files" action:@selector(filesPressed)];
     UIButton *about=[self button:@"About and updates" action:@selector(aboutPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
@@ -454,7 +466,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)logPressed {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     LauncherDiagnostics *viewer=[LauncherDiagnostics new];
-    viewer.logURL=[documents URLByAppendingPathComponent:@"LauncherLogs/launcher.log"];
+    viewer.directory=[documents URLByAppendingPathComponent:@"LauncherLogs" isDirectory:YES];
     UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:viewer];
     [self presentViewController:navigation animated:YES completion:nil];
 }

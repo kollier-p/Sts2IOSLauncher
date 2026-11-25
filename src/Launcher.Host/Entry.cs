@@ -587,16 +587,26 @@ public static class Entry
         {
             var library = ActiveMods();
             var installed = library.List();
-            var choices = installed.Select(mod => new Choice(mod.Key, mod.Label,
-                $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")).ToArray();
-            if (choices.Length == 0) return new("idle", "Import a mod archive to get started.");
-            var selected = await Ask("mod", "Installed mod packages", ct, choices);
+            var paused = library.LoadingPaused;
+            var choices = new List<Choice> { new("loading", paused ? "Resume mod loading" : "Pause mod loading",
+                "Applies to this mod folder at the next launch") };
+            choices.AddRange(installed.Select(mod => new Choice(mod.Key, mod.Label,
+                $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")));
+            var selected = await Ask("mod", "Installed mod packages", ct, choices.ToArray());
+            if (selected == "loading")
+            {
+                ct.ThrowIfCancellationRequested();
+                library.SetLoadingPaused(!paused);
+                return new("idle", paused ? "Mod loading will resume at next launch." : "Mod loading is paused.");
+            }
             var mod = installed.SingleOrDefault(item => item.Key == selected)
                 ?? throw new InvalidDataException("The selected mod is unavailable.");
             var action = await Ask("mod-action", mod.Label, ct,
                 [new("toggle", mod.Enabled ? "Disable package" : "Enable package", "Apply to the selected profile's mod directory"),
+                 new("modules", "Modules and dependencies", "Review versions and module status"),
                  new("remove", "Remove package", "Delete the files installed with this package")]);
             ct.ThrowIfCancellationRequested();
+            if (action == "modules") return await BrowseModModulesAsync(library, mod, ct);
             if (action == "toggle")
             {
                 library.SetEnabled(selected, !mod.Enabled);
@@ -610,6 +620,38 @@ public static class Entry
             library.Remove(selected);
             return new("idle", "Mod package removed.");
         }) ? 0 : -1;
+
+    static async Task<State> BrowseModModulesAsync(ModLibrary library, InstalledMod package, CancellationToken ct)
+    {
+        var modules = library.Modules(package.Key);
+        if (modules.Count == 0) return new("idle", "Reimport this package to make module controls available.");
+        var installed = library.EnabledModuleIds();
+        var choices = modules.Select(item =>
+        {
+            var module = item.Module;
+            var status = item.Enabled is null ? "Manifest unavailable" : item.Enabled == true ? "Enabled" : "Disabled";
+            var missing = module.Dependencies.Count(dependency => !installed.Contains(dependency));
+            if (missing != 0) status += $" · {missing} missing dependencies";
+            return new Choice(module.Id, module.Id, string.Join(" · ", new[] { status, module.Version, module.Author }.Where(value => value.Length != 0)));
+        }).ToArray();
+        var selected = await Ask("mod-modules", package.Label, ct, choices);
+        var selectedModule = modules.SingleOrDefault(item => item.Module.Id == selected)
+            ?? throw new InvalidDataException("The selected mod module is unavailable.");
+        var info = selectedModule.Module;
+        var lines = new List<string>();
+        if (!string.IsNullOrEmpty(info.MinimumGameVersion)) lines.Add($"Minimum game version {info.MinimumGameVersion}");
+        var dependencies = info.Dependencies.Select(dependency => installed.Contains(dependency) ? dependency : $"{dependency} (missing or disabled)");
+        if (info.Dependencies.Length != 0) lines.Add(string.Join(", ", dependencies));
+        if (selectedModule.Enabled is null) return new("error", "This mod module needs its original manifest. Reimport the package.");
+        var action = await Ask("mod-module-toggle", info.Id, ct,
+            [new("keep", "Keep current setting", "Return to the launcher"),
+             new("toggle", selectedModule.Enabled == true ? "Disable module" : "Enable module",
+                 lines.Count == 0 ? "Applies the next time the game starts" : string.Join("\n", lines))]);
+        if (action != "toggle") return new("idle", "Module settings kept.");
+        ct.ThrowIfCancellationRequested();
+        library.SetModuleEnabled(package.Key, selected, selectedModule.Enabled == false);
+        return new("idle", selectedModule.Enabled == true ? "Mod module disabled." : "Mod module enabled.");
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseWorkshop() => Start("Steam Workshop", new("mods", "Opening Steam Workshop…"),
@@ -746,11 +788,66 @@ public static class Entry
         if (!int.TryParse(selected, NumberStyles.None, CultureInfo.InvariantCulture, out var selection) || selection >= manifests.Count)
             return new("error", "Choose an available Workshop version.");
         var library = ActiveMods();
+        var version = manifests[selection];
+        if (!await InstallWorkshopDependenciesAsync(session, library, item, version.Branch, ct))
+            return new("idle", "Workshop installation stopped before installing the selected item.");
+        return await DownloadWorkshopItemAsync(session, library, item, version, ct);
+    }
+
+    static async Task<bool> InstallWorkshopDependenciesAsync(SteamSession session, ModLibrary library, WorkshopItem item,
+        string branch, CancellationToken ct)
+    {
+        var installed = library.List().Where(mod => mod.Enabled && mod.Workshop is { } origin &&
+            origin.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase)).Select(mod => mod.Workshop!.ItemId).ToHashSet();
+        var dependencies = new Dictionary<ulong, WorkshopItem>();
+        IReadOnlyList<ulong> missing;
+        try
+        {
+            Publish(new("mods", "Checking Workshop dependencies…"));
+            missing = await WorkshopDependencyOrder.MissingAsync(item.Id, installed, async (id, token) =>
+            {
+                var details = await session.WorkshopDetailsAsync(id, token);
+                dependencies[id] = details.Item;
+                return details.Dependencies;
+            }, ct);
+        }
+        catch (IOException error)
+        {
+            HostDiagnostics.Error("Workshop dependencies", error);
+            return await Ask("workshop-dependency-error", "Steam did not return all dependency details.", ct,
+                [new("cancel", "Return to launcher", "Review the required items in Steam"),
+                 new("one", "Install this item only", "Continue with the selected Workshop item")]) == "one";
+        }
+        if (missing.Count == 0) return true;
+        var titles = string.Join(", ", missing.Select(id => dependencies[id].Title));
+        var choice = await Ask("workshop-dependencies", $"{missing.Count} Workshop dependencies",
+            ct, [new("cancel", "Cancel installation", "Return to the launcher"),
+                 new("queue", "Install dependencies and item", titles),
+                 new("one", "Install this item only", "Use any dependencies already on the iPad")]);
+        if (choice != "queue") return choice == "one";
+        foreach (var id in missing)
+        {
+            var dependency = dependencies[id];
+            var manifests = await session.WorkshopManifestsAsync(dependency, ct);
+            var target = WorkshopManifest.ResolveBranch(manifests, branch);
+            if (target is null && manifests.FirstOrDefault(manifest => manifest.Source == "Default manifest") is { } fallback)
+                target = fallback with { Branch = branch };
+            if (target is null) throw new InvalidDataException($"Steam did not return a manifest for Workshop dependency {id}.");
+            await DownloadWorkshopItemAsync(session, library, dependency, target, ct);
+            if (!library.List().Any(mod => mod.Enabled && mod.Workshop is { } origin && origin.ItemId == id &&
+                origin.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase))) return false;
+        }
+        return true;
+    }
+
+    static async Task<State> DownloadWorkshopItemAsync(SteamSession session, ModLibrary library, WorkshopItem item,
+        WorkshopManifest version, CancellationToken ct)
+    {
+        var title = new string(item.Title.Where(character => !char.IsControl(character)).Take(128).ToArray());
         var progress = new DirectProgress<DownloadProgress>(value =>
-            Publish(new("mods", "Downloading Workshop files…", value.Completed, value.Total, value.BytesPerSecond,
+            Publish(new("mods", $"Downloading {title}…", value.Completed, value.Total, value.BytesPerSecond,
                 value.Remaining?.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture))));
         Publish(new("mods", "Requesting Workshop files from Steam…"));
-        var version = manifests[selection];
         using var incoming = await library.PrepareDownloadAsync(item.Title,
             (stage, token) => session.DownloadWorkshopManifestAsync(version, stage, progress, token), ct,
             new WorkshopOrigin(item.Id, version.Branch, version.Id, item.Updated));
@@ -922,8 +1019,10 @@ public static class Entry
         if (NativeExtensionsAvailable() != 1) return new("error", "Play requires an extension-enabled launcher build.");
         if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
         var plan = LaunchPlan.Prepare(payloads, documents, ct, activeProfile.PayloadId);
-        launchProfilePaths = profiles!.EnsureDirectories(activeProfile);
-        new ModLibrary(launchProfilePaths.ModsDirectory).List();
+        var paths = profiles!.EnsureDirectories(activeProfile);
+        var modLibrary = new ModLibrary(paths.ModsDirectory);
+        var mods = modLibrary.RuntimeDirectory();
+        launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
         var support = Path.GetDirectoryName(payloads.Root)!;
         WebDavAutomation? automation = null;
         if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay } webDav)
@@ -959,6 +1058,9 @@ public static class Entry
         {
             if (File.Exists(temporary)) File.Delete(temporary);
         }
+        var godotLog = Payload.SafePath(documents, "LauncherLogs/godot.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(godotLog)!);
+        if (File.Exists(godotLog)) File.Move(godotLog, Payload.SafePath(documents, "LauncherLogs/godot.log.previous"), overwrite: true);
         assemblyRoot = plan.Assemblies;
         adapterRoot = adapter;
         automation?.GameStarting();

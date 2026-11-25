@@ -320,7 +320,7 @@ try
         var path = Path.Combine(root, name + ".zip");
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
         using (var manifest = new StreamWriter(zip.CreateEntry("module/mod_manifest.json").Open()))
-            manifest.Write(System.Text.Json.JsonSerializer.Serialize(new { id }));
+            manifest.Write(System.Text.Json.JsonSerializer.Serialize(new { id, version = "1.0", dependencies = new[] { "FrameworkMod" } }));
         using (var pack = zip.CreateEntry("module/" + (id == "../invalid" ? "TestMod" : id) + ".pck").Open()) pack.Write("GDPC"u8);
         using (var extra = new StreamWriter(zip.CreateEntry("module/description.txt").Open())) extra.Write(description);
         return path;
@@ -328,6 +328,15 @@ try
     using var firstMod = mods.PrepareArchiveAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
     var installedMod = mods.Install(firstMod, replace: false, CancellationToken.None);
     Assert(File.Exists(Path.Combine(modsRoot, installedMod.Key, "module", "TestMod.json")), "Legacy mod manifests get their expected filename");
+    mods.SetLoadingPaused(true);
+    var pausedRoot = new ModLibrary(modsRoot).RuntimeDirectory();
+    Assert(pausedRoot != modsRoot && !Directory.EnumerateFileSystemEntries(pausedRoot).Any() && mods.List().Single().Enabled,
+        "Pausing all mods switches the runtime to an empty directory while preserving package settings");
+    mods.SetLoadingPaused(false);
+    Assert(mods.RuntimeDirectory() == modsRoot, "Resuming mods restores the selected install directory");
+    mods.SetModuleEnabled(installedMod.Key, "TestMod", false);
+    Assert(mods.Modules(installedMod.Key).Single() is { Enabled: false, Module.Dependencies: ["FrameworkMod"] } &&
+        !mods.EnabledModuleIds().Contains("TestMod"), "Module controls retain dependencies and disable only the selected manifest");
     Assert(!mods.SetEnabled(installedMod.Key, false).Enabled && !Directory.Exists(Path.Combine(modsRoot, installedMod.Key)),
         "Disabled mods are outside the runtime scan directory");
     using var secondMod = mods.PrepareArchiveAsync(CreateModZip("Second mod", "TestMod", "new"), CancellationToken.None).GetAwaiter().GetResult();
@@ -336,6 +345,9 @@ try
     Assert(!replacementMod.Enabled && replacementMod.Key == installedMod.Key, "Updates preserve enabled state and package identity");
     mods.SetEnabled(replacementMod.Key, true);
     Assert(File.ReadAllText(Path.Combine(modsRoot, installedMod.Key, "module", "description.txt")) == "new", "The replacement is made active");
+    Assert(mods.Modules(replacementMod.Key).Single().Enabled == false, "Package replacement preserves module-level choices");
+    mods.SetModuleEnabled(replacementMod.Key, "TestMod", true);
+    Assert(mods.EnabledModuleIds().Contains("TestMod"), "A module can be re-enabled after replacement");
     mods.Remove(installedMod.Key);
     Assert(mods.List().Count == 0, "Managed mod removal clears its install directory");
     Reject(() => mods.PrepareArchiveAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());

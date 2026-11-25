@@ -50,7 +50,8 @@ def validate(app, extensions, fixtures):
     binary = app / info["CFBundleExecutable"]
     if bool(info.get("STS2ExtensionFixtures")) != fixtures:
         raise SystemExit("App extension fixture marker differs from the build mode")
-    if info.get("MinimumOSVersion") != "16.0" or info.get("godot_cmdline") != ["--main-pack", "user://StS2.pck"]:
+    arguments = ["--main-pack", "user://StS2.pck", "--log-file", "user://LauncherLogs/godot.log"]
+    if info.get("MinimumOSVersion") != "16.0" or info.get("godot_cmdline") != arguments:
         raise SystemExit("Godot launch arguments or deployment target differ from the launcher contract")
     verify_device_binary(binary)
     verify_symbols(binary, "_sts2_extensions_available", "_OBJC_CLASS_$_LauncherGate")

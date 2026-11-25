@@ -33,7 +33,8 @@ internal static class GameCompatibility
         var mods=game.GetType("MegaCrit.Sts2.Core.Modding.ModManager");
         var scanner=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadModsInDirRecursive"&&m.GetParameters().FirstOrDefault()?.ParameterType==typeof(string)).ToArray()??[];
         if(scanner.Length==1) Patch(scanner[0],typeof(GameCompatibility).GetMethod(nameof(ModPath),Flags)!);
-        else if (profile.IsolateMods) throw new NotSupportedException("This game build does not expose a compatible mod directory scanner.");
+        else if (profile.IsolateMods || paths.ModsPaused)
+            throw new NotSupportedException("This game build does not expose a compatible mod directory scanner.");
         var steamScan=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadSteamMods").ToArray()??[];
         foreach(var method in steamScan)
         {

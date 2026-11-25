@@ -132,6 +132,22 @@ public sealed class SteamSession : IAsyncDisposable
     }
     void RequireSession() { if (!authenticated) throw new InvalidOperationException("Steam login required."); }
 
+    public async Task<(WorkshopItem Item, IReadOnlyList<ulong> Dependencies)> WorkshopDetailsAsync(ulong id, CancellationToken ct)
+    {
+        RequireSession();
+        var published = client.GetHandler<SteamUnifiedMessages>()!.CreateService<PublishedFile>();
+        var query = new CPublishedFile_GetDetails_Request { appid = Payload.AppId, includechildren = true };
+        query.publishedfileids.Add(id);
+        var result = await published.GetDetails(query).ToTask().WaitAsync(ct);
+        var details = result.Result == EResult.OK ? result.Body?.publishedfiledetails.SingleOrDefault(item =>
+            item.publishedfileid == id && item.consumer_appid == Payload.AppId && item.result == (uint)EResult.OK && !item.banned) : null;
+        if (details is null) throw new IOException($"Steam returned no authorized details for Workshop item {id}.");
+        var title = string.IsNullOrWhiteSpace(details.title) ? $"Workshop {id}" : details.title;
+        var item = new WorkshopItem(id, title, null, null, details.hcontent_file == 0 ? null : details.hcontent_file, details.time_updated);
+        var dependencies = details.children.OrderBy(child => child.sortorder).Select(child => child.publishedfileid).Distinct().ToArray();
+        return (item, dependencies);
+    }
+
     public async Task<IReadOnlyList<WorkshopManifest>> WorkshopManifestsAsync(WorkshopItem item, CancellationToken ct)
     {
         RequireSession();
