@@ -251,6 +251,13 @@ try
     Directory.Move(saves, saves + ".before-restore");
     SaveSnapshots.RecoverInterruptedRestore(saves);
     Assert(File.ReadAllText(saveFile) == "second run", "Interrupted restore recovers the previous save directory");
+    var edited = profiles.Edit(isolated.Id, "Renamed", false, true);
+    Assert(edited.Id == isolated.Id && !edited.IsolateSaves && edited.IsolateMods &&
+        new LaunchProfiles(profileSettings, profileData).Current() == edited && File.ReadAllText(saveFile) == "second run",
+        "Changing profile folders preserves the profile identity and its prior data");
+    Assert(profiles.Remove(isolated.Id) == LaunchProfiles.Default && profiles.Current() == LaunchProfiles.Default &&
+        profiles.List().All(item => item.Id != isolated.Id) && File.ReadAllText(saveFile) == "second run",
+        "Removing the selected profile activates the default and preserves isolated files for export");
     var webDavSettings = new WebDavSettings("https://dav.example/dav/", "user", "fixture", "global", false);
     Reject(() => (webDavSettings with { Slot = "../outside" }).BaseUri());
     Assert(SaveFileRules.Include("modded/profile2/saves/history/test.run", false) &&
@@ -282,6 +289,30 @@ try
     Assert(File.ReadAllText(syncFile) == "unsynced local run", "WebDAV conflicts leave live files intact");
     Assert(SyncDav(false, true).Transferred == 1 && File.ReadAllText(syncFile) == "other device run" &&
         new SaveSnapshots(syncRoot, syncBackups).List().Any(backup => backup.Reason == "Before cloud pull"), "Explicit conflict resolution backs up local data first");
+    var automaticSettings = webDavSettings with { Automation = WebDavAutomationMode.SyncBeforePlay };
+    var automaticRoot = Path.Combine(root, "sync-pending");
+    var automaticWebDav = new WebDavAutomation(automaticSettings, automaticRoot, "shared");
+    var automaticCalls = new List<bool>();
+    Task LogSync(bool upload, CancellationToken _)
+    {
+        automaticCalls.Add(upload);
+        return Task.CompletedTask;
+    }
+    automaticWebDav.BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { false }), "First automatic launch only pulls");
+    automaticWebDav.GameStarting();
+    Reject(() => automaticWebDav.BeforePlayAsync((upload, _) => upload
+        ? Task.FromException(new SaveSyncConflictException(1)) : throw new InvalidOperationException("A conflicted push must stop the pull"),
+        CancellationToken.None).GetAwaiter().GetResult());
+    automaticCalls.Clear();
+    new WebDavAutomation(automaticSettings, automaticRoot, "isolated").BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { false }), "Pending uploads are isolated by save scope");
+    automaticCalls.Clear();
+    automaticWebDav.BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { true, false }), "An interrupted automatic upload is retried before the next pull");
+    automaticCalls.Clear();
+    automaticWebDav.BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { false }), "A successful upload clears the previous session marker");
     var modsRoot = Path.Combine(root, "mod-profile", "mods");
     var mods = new ModLibrary(modsRoot);
     string CreateModZip(string name, string id, string description)

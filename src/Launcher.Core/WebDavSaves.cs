@@ -7,7 +7,10 @@ using System.Xml.Linq;
 
 namespace Launcher.Core;
 
-public sealed record WebDavSettings(string Endpoint, string User, string Password, string Slot, bool IncludeSettings)
+public enum WebDavAutomationMode { Manual, PullBeforePlay, SyncBeforePlay }
+
+public sealed record WebDavSettings(string Endpoint, string User, string Password, string Slot, bool IncludeSettings,
+    WebDavAutomationMode Automation = WebDavAutomationMode.Manual)
 {
     public Uri BaseUri()
     {

@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "LauncherFiles.mm"
 
 extern "C" int csops(pid_t,unsigned int,void*,size_t);
 using InitRuntime = int (*)(const char*,const char*,const char*);
@@ -122,7 +123,7 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
@@ -211,6 +212,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UIButton *workshopWebsite=[self button:@"Browse Steam Workshop" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
     self.diagnostics=[self button:@"Launcher log" action:@selector(logPressed)];
+    self.files=[self button:@"Launcher files" action:@selector(filesPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
@@ -227,7 +229,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
-    UIStackView *toolsSection=[self section:@[self.diagnostics]];
+    UIStackView *toolsSection=[self section:@[self.files,self.diagnostics]];
     self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
     UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
@@ -240,6 +242,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
+    self.files.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -303,6 +306,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
     self.diagnostics.enabled=idle;
+    self.files.enabled=idle;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -359,7 +363,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
         return;
     }
     NSString *title=@"Steam";
-    if([kind isEqual:@"profile-name"]) title=@"New launch profile";
+    if([kind isEqual:@"profile-name"]) title=@"Launch profile";
     if([kind hasPrefix:@"webdav-"]) title=@"WebDAV";
     if([kind hasPrefix:@"nexus-"]) title=@"Nexus Mods";
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -394,6 +398,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
 - (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
+- (void)filesPressed {
+    NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    UIViewController *browser=launcherFileBrowser(documents);
+    [self presentViewController:browser animated:YES completion:nil];
+}
 - (void)logPressed {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     LauncherDiagnostics *viewer=[LauncherDiagnostics new];

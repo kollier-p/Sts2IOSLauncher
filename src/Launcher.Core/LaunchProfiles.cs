@@ -87,6 +87,42 @@ public sealed class LaunchProfiles(string settingsFile, string documents)
         }
     }
 
+    public LaunchProfile Edit(string id, string name, bool isolateSaves, bool isolateMods)
+    {
+        name = name.Trim();
+        if (!ValidId(id) || !ValidName(name)) throw new ArgumentException("Invalid launch profile or name.");
+        lock (sync)
+        {
+            var config = Read();
+            var index = Array.FindIndex(config.Profiles, profile => profile.Id == id);
+            if (index < 0) throw new InvalidDataException("Launch profile not found.");
+            if (string.Equals(Default.Name, name, StringComparison.OrdinalIgnoreCase) || config.Profiles.Any(profile =>
+                profile.Id != id && string.Equals(profile.Name, name, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("A profile with that name already exists.");
+            var updated = config.Profiles[index] with { Name = name, IsolateSaves = isolateSaves, IsolateMods = isolateMods };
+            EnsureDirectories(updated);
+            config.Profiles[index] = updated;
+            Write(config);
+            return updated;
+        }
+    }
+
+    public LaunchProfile Remove(string id)
+    {
+        if (!ValidId(id)) throw new ArgumentException("Choose an editable launch profile.");
+        lock (sync)
+        {
+            var config = Read();
+            var remaining = config.Profiles.Where(profile => profile.Id != id).ToArray();
+            if (remaining.Length == config.Profiles.Length) throw new InvalidDataException("Launch profile not found.");
+            var selected = config.Active == id || config.Active == Default.Id ? Default :
+                remaining.Single(profile => profile.Id == config.Active);
+            EnsureDirectories(selected);
+            Write(new(selected.Id, remaining));
+            return selected;
+        }
+    }
+
     public LaunchProfilePaths EnsureDirectories(LaunchProfile profile)
     {
         if (profile.Id != Default.Id && !ValidId(profile.Id))

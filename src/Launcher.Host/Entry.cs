@@ -281,13 +281,9 @@ public static class Entry
                     return new("error", "Enter a profile name between 1 and 64 characters.");
                 if (existing.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
                     return new("error", "A profile with that name already exists.");
-                var isolation = await Ask("profile-isolation", "Choose what to isolate", ct,
-                    [new("both", "Saves and mods", "Separate both directories for this profile"),
-                     new("saves", "Saves only", "Share mods with the default profile"),
-                     new("mods", "Mods only", "Use the game's existing saves")]);
-                if (isolation is not ("both" or "saves" or "mods")) throw new InvalidDataException("Invalid profile mode.");
+                var (isolateSaves, isolateMods) = await AskProfileIsolation(ct);
                 ct.ThrowIfCancellationRequested();
-                profile = stored.Create(name, isolation != "mods", isolation != "saves");
+                profile = stored.Create(name, isolateSaves, isolateMods);
             }
             else if (selection == "unpin" && activeProfile?.PayloadId is not null)
             {
@@ -296,6 +292,46 @@ public static class Entry
             }
             else
             {
+                var chosen = existing.SingleOrDefault(item => item.Id == selection) ?? throw new InvalidDataException("Launch profile not found.");
+                if (chosen.Id != LaunchProfiles.Default.Id)
+                {
+                    var action = await Ask("profile-action", chosen.Name, ct,
+                        [new("select", "Use this profile", "Select it for the next game launch"),
+                         new("rename", "Rename", "Change the name in the launcher"),
+                         new("folders", "Change save and mod folders", "Choose shared or isolated storage"),
+                         new("remove", "Remove profile", "Remove the profile from the launcher")]);
+                    if (action == "rename" || action == "folders")
+                    {
+                        var name = chosen.Name;
+                        var saveIsolation = chosen.IsolateSaves;
+                        var modIsolation = chosen.IsolateMods;
+                        if (action == "rename")
+                        {
+                            name = (await Ask("profile-name", "Enter a new profile name", ct)).Trim();
+                            if (name.Length is < 1 or > 64 || name.Any(char.IsControl))
+                                return new("error", "Enter a profile name between 1 and 64 characters.");
+                            if (existing.Any(item => item.Id != chosen.Id && string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
+                                return new("error", "A profile with that name already exists.");
+                        }
+                        else (saveIsolation, modIsolation) = await AskProfileIsolation(ct);
+                        ct.ThrowIfCancellationRequested();
+                        var updated = stored.Edit(chosen.Id, name, saveIsolation, modIsolation);
+                        if (activeProfile?.Id == updated.Id) SetProfile(updated, profileVersion);
+                        return new("idle", $"Updated {updated.Name}.");
+                    }
+                    if (action == "remove")
+                    {
+                        var confirm = await Ask("profile-remove", $"Remove {chosen.Name}?", ct,
+                            [new("keep", "Keep profile", "Return to the launcher"),
+                             new("remove", "Remove profile", "Keep its files in Launcher files")]);
+                        if (confirm != "remove") return new("idle", "Launch profile kept.");
+                        ct.ThrowIfCancellationRequested();
+                        var remaining = stored.Remove(chosen.Id);
+                        SetProfile(remaining, remaining.PayloadId is string pin ? payloads.FindVersion(pin) : null);
+                        return new("idle", $"Removed {chosen.Name}. Active profile is {remaining.Name}.");
+                    }
+                    if (action != "select") throw new InvalidDataException("Choose a launch profile action.");
+                }
                 ct.ThrowIfCancellationRequested();
                 profile = stored.Select(selection);
             }
@@ -305,6 +341,23 @@ public static class Entry
                 ? new("error", "The pinned game version is unavailable. Choose a version or follow the global version.")
                 : new("idle", $"Launch profile selected: {profile.Name}.");
         }) ? 0 : -1;
+
+    static async Task<(bool Saves, bool Mods)> AskProfileIsolation(CancellationToken ct)
+    {
+        var isolation = await Ask("profile-isolation", "Choose what to isolate", ct,
+            [new("both", "Saves and mods", "Separate both directories for this profile"),
+             new("saves", "Saves only", "Use shared mods"),
+             new("mods", "Mods only", "Use shared saves"),
+             new("shared", "Shared saves and mods", "Use the default folders")]);
+        return isolation switch
+        {
+            "both" => (true, true),
+            "saves" => (true, false),
+            "mods" => (false, true),
+            "shared" => (false, false),
+            _ => throw new InvalidDataException("Invalid profile mode.")
+        };
+    }
 
     static void SetProfile(LaunchProfile profile, InstallReceipt? version)
     {
@@ -362,6 +415,12 @@ public static class Entry
             if (settings is not null)
             {
                 choices.Add(new("test", "Test connection", $"Remote slot {settings.Slot}"));
+                choices.Add(new("automation", "Automatic sync", settings.Automation switch
+                {
+                    WebDavAutomationMode.PullBeforePlay => "Download before playing",
+                    WebDavAutomationMode.SyncBeforePlay => "Sync when starting the game",
+                    _ => "Manual"
+                }));
                 choices.Add(new("pull", "Download saves", "Back up and apply remote changes"));
                 choices.Add(new("push", "Upload saves", "Send local save changes"));
                 choices.Add(new("forget", "Forget WebDAV connection", "Remove the credentials from Keychain"));
@@ -384,6 +443,21 @@ public static class Entry
                 return new("idle", "WebDAV connection saved.");
             }
             if (settings is null) throw new InvalidOperationException("A WebDAV connection is required.");
+            if (action == "automation")
+            {
+                var mode = await Ask("webdav-automation", "Automatic WebDAV sync", ct,
+                    [new("manual", "Manual", "Sync only from the Saves page"),
+                     new("pull", "Download before playing", "Check for new remote saves before launching"),
+                     new("sync", "Sync before playing", "Upload saves from the last session, then check for remote changes")]);
+                ct.ThrowIfCancellationRequested();
+                WebDavVault.Save(settings with { Automation = mode switch
+                {
+                    "pull" => WebDavAutomationMode.PullBeforePlay,
+                    "sync" => WebDavAutomationMode.SyncBeforePlay,
+                    _ => WebDavAutomationMode.Manual
+                } });
+                return new("idle", "WebDAV sync mode saved.");
+            }
             if (action == "forget")
             {
                 if (WebDavVault.Clear() != 0) throw new IOException("Unable to clear the WebDAV credentials.");
@@ -768,16 +842,26 @@ public static class Entry
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Prepare() => Start("Launch preparation", new("verify", "Verifying installation…"),
-        (payloads, ct) => Task.FromResult(PrepareLaunch(payloads, ct))) ? 0 : -1;
+        PrepareLaunchAsync) ? 0 : -1;
 
-    static State PrepareLaunch(PayloadStore payloads, CancellationToken ct)
+    static async Task<State> PrepareLaunchAsync(PayloadStore payloads, CancellationToken ct)
     {
         if (NativeExtensionsAvailable() != 1) return new("error", "Play requires an extension-enabled launcher build.");
         if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
         var plan = LaunchPlan.Prepare(payloads, documents, ct, activeProfile.PayloadId);
         launchProfilePaths = profiles!.EnsureDirectories(activeProfile);
         new ModLibrary(launchProfilePaths.ModsDirectory).List();
-        var adapter = Path.Combine(Path.GetDirectoryName(payloads.Root)!, "RuntimeAdapters", plan.Receipt.PayloadId);
+        var support = Path.GetDirectoryName(payloads.Root)!;
+        WebDavAutomation? automation = null;
+        if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay } webDav)
+        {
+            var profileKey = activeProfile.IsolateSaves ? activeProfile.Id : "shared";
+            automation = new WebDavAutomation(webDav, Payload.SafePath(support, "WebDavAutomation"), profileKey);
+            if (!await SyncBeforePlayAsync(automation, webDav, support, profileKey, profiles.SnapshotSaveDirectory(activeProfile), ct))
+                return new("idle", "Launch cancelled. Use WebDAV save sync to review the connection or conflicts.");
+        }
+        Publish(new("verify", "Preparing runtime files…"));
+        var adapter = Path.Combine(support, "RuntimeAdapters", plan.Receipt.PayloadId);
         Directory.CreateDirectory(adapter);
         var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
         if (!File.Exists(harmony)) throw new FileNotFoundException("The verified game payload is missing Harmony.", harmony);
@@ -804,9 +888,42 @@ public static class Entry
         }
         assemblyRoot = plan.Assemblies;
         adapterRoot = adapter;
+        automation?.GameStarting();
         loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
         releaseInfo = Path.Combine(Path.GetDirectoryName(plan.Pack)!, "release_info.json");
         return new("ready", "Game verified. Starting Godot…");
+    }
+
+    static async Task<bool> SyncBeforePlayAsync(WebDavAutomation automation, WebDavSettings settings, string support,
+        string profileKey, string saves, CancellationToken ct)
+    {
+        var snapshots = Payload.SafePath(support, $"SaveSnapshots/{profileKey}");
+        var baseline = Payload.SafePath(support, "WebDavBaselines");
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(TimeSpan.FromSeconds(60));
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+            var cloud = new WebDavSaves(http, settings);
+            await automation.BeforePlayAsync(async (upload, token) =>
+            {
+                Publish(new("webdav", upload ? "Uploading the previous session’s saves…" : "Checking WebDAV for new saves…"));
+                await cloud.SyncAsync(saves, snapshots, baseline, profileKey, upload, overwriteConflicts: false, token);
+            }, deadline.Token);
+            return true;
+        }
+        catch (Exception error) when (!ct.IsCancellationRequested &&
+            error is IOException or HttpRequestException or ArgumentException or InvalidDataException or OperationCanceledException)
+        {
+            HostDiagnostics.Error("automatic WebDAV sync", error);
+            var message = error is SaveSyncConflictException conflict
+                ? $"{conflict.Count} save files have conflicting changes."
+                : "The automatic WebDAV sync did not complete.";
+            var action = await Ask("webdav-beforeready", message, ct,
+                [new("cancel", "Return to launcher", "Review the connection and conflicts under Saves"),
+                 new("play", "Play with iPad saves", "Continue using the save files currently on this device")]);
+            return action == "play";
+        }
     }
 
     [DllImport("__Internal", EntryPoint = "sts2_extensions_available")]
