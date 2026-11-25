@@ -402,14 +402,18 @@ extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launch
         prepareGameShutdown();
         [gameKeys removeFromSuperview];
         gameKeys=nil;
+        // UIKit can query the old controller's orientation and gesture settings
+        // while switching key windows. Those callbacks still need live Godot.
+        gate.view.userInteractionEnabled=NO;
+        gate.message.text=@"Closing game…";
+        [gate.window makeKeyAndVisible];
+        gameWindow.hidden=YES;
         // The template's termination callback runs apple_embedded_finish and
         // tears down Godot's main loop, audio, renderers, and game resources.
         callGodotLifecycle(gate.service,@selector(applicationWillTerminate:),gate.application);
         [NSNotificationCenter.defaultCenter removeObserver:gate.service
             name:AVAudioSessionInterruptionNotification object:AVAudioSession.sharedInstance];
         [gate.service setValue:gate.window forKey:@"window"];
-        [gate.window makeKeyAndVisible];
-        gameWindow.hidden=YES;
         gameWindow.rootViewController=nil;
         // The template retains this controller internally. Drop its GDTView so
         // it releases UIKit rendering and motion resources after engine cleanup.
@@ -420,6 +424,7 @@ extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launch
         startGameSync(gate.application);
         [gate startPolling];
         [gate tick];
+        gate.view.userInteractionEnabled=YES;
     });
     return 1;
 }
