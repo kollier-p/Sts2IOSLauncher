@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Reflection.PortableExecutable;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Launcher.Core;
 
@@ -8,7 +9,11 @@ public sealed record WorkshopOrigin(ulong ItemId, string Branch, ulong? Manifest
 public sealed record ModModule(string Id, string Manifest, string Version, string Author, string[] Dependencies, string? MinimumGameVersion);
 public sealed record ModModuleState(ModModule Module, bool? Enabled);
 public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled, WorkshopOrigin? Workshop = null,
-    ModModule[]? Modules = null);
+    ModModule[]? Modules = null, string? Group = null, string? Note = null)
+{
+    [JsonIgnore]
+    public string DisplayLabel => string.IsNullOrEmpty(Note) ? Label : Note;
+}
 public sealed record ModPreset(string Id, string Name, int Packages);
 
 public sealed class ModLibrary(string activeDirectory)
@@ -182,7 +187,8 @@ public sealed class ModLibrary(string activeDirectory)
         if (previous is not null && !replace) throw new InvalidOperationException("Confirm replacement of the installed mod.");
         var key = previous?.Key ?? Guid.NewGuid().ToString("N");
         var enabled = previous?.Enabled ?? true;
-        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled, import.Workshop, import.Modules);
+        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled, import.Workshop, import.Modules,
+            previous?.Group, previous?.Note);
         var destination = Location(key, enabled);
         if (previous?.Modules is { } previousModules)
         {
@@ -212,6 +218,26 @@ public sealed class ModLibrary(string activeDirectory)
         Recover();
         var current = Get(key);
         return MoveEnabled(current, enabled);
+    }
+
+    public InstalledMod SetPresentation(string key, string? group, string? note)
+    {
+        group = CleanLabel(group, 64);
+        note = CleanLabel(note, 96);
+        using var operation = Lock();
+        Recover();
+        var current = Get(key);
+        var updated = current with { Group = group, Note = note };
+        WriteReceipt(Location(key, current.Enabled), updated, update: true);
+        return updated;
+    }
+
+    static string? CleanLabel(string? value, int maximum)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+        if (trimmed.Length > maximum || trimmed.Any(char.IsControl)) throw new ArgumentException("The mod label has invalid characters or length.");
+        return trimmed;
     }
 
     InstalledMod MoveEnabled(InstalledMod current, bool enabled)
@@ -456,7 +482,8 @@ public sealed class ModLibrary(string activeDirectory)
                 catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException) { }
             }
         }
-        return result.OrderBy(mod => mod.Label, StringComparer.OrdinalIgnoreCase).ToArray();
+        return result.OrderBy(mod => mod.Group, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(mod => mod.DisplayLabel, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     static InstalledMod TryUpgradeReceipt(string path, InstalledMod original)

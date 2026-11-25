@@ -294,6 +294,17 @@ try
         !File.Exists(Path.Combine(targetSlot, "progress.save")) && File.ReadAllText(saveFile) == "second run" &&
         snapshotStore.List().Any(item => item.Reason == "Before save slot transfer"), "Transfers replace just the selected slot after a durable backup");
     Assert(snapshotStore.TransferSlot(3, toModded: false) == 0, "An empty source slot leaves existing saves intact");
+    var managedSnapshots = new SaveSnapshots(saves, Path.Combine(root, "snapshot-retention"));
+    var oldest = managedSnapshots.Create("First")!;
+    var newest = managedSnapshots.Create("Second")!;
+    Assert(managedSnapshots.List().Count == 2 && managedSnapshots.RetentionLimit() is null, "Snapshot retention defaults to keeping all backups");
+    managedSnapshots.SetRetentionLimit(1, CancellationToken.None);
+    var importedRetained = managedSnapshots.ImportArchive(exported);
+    Assert(managedSnapshots.List().Single().Id == importedRetained.Id && managedSnapshots.RetentionLimit() == 1,
+        "Retention keeps the newly imported archive even when its original timestamp is older");
+    Assert(!managedSnapshots.List().Any(item => item.Id == oldest.Id || item.Id == newest.Id), "Configured retention removes expired backups");
+    managedSnapshots.Delete(importedRetained.Id, CancellationToken.None);
+    Assert(managedSnapshots.List().Count == 0 && File.ReadAllText(saveFile) == "second run", "Deleting a snapshot preserves the live save files");
     var edited = profiles.Edit(isolated.Id, "Renamed", false, true);
     Assert(edited.Id == isolated.Id && !edited.IsolateSaves && edited.IsolateMods &&
         new LaunchProfiles(profileSettings, profileData).Current() == edited && File.ReadAllText(saveFile) == "second run",
@@ -393,6 +404,9 @@ try
     File.WriteAllText(Path.Combine(modsRoot, installedMod.Key, ".sts2-mod-install"),
         System.Text.Json.JsonSerializer.Serialize(installedMod with { Modules = null }));
     Assert(mods.Modules(installedMod.Key).Single().Module.Id == "TestMod", "Existing mod receipts gain module controls in place");
+    var annotated = mods.SetPresentation(installedMod.Key, "Test group", "Preferred name");
+    Assert(annotated.Group == "Test group" && mods.List().Single().DisplayLabel == "Preferred name",
+        "A local group and note persist on the package");
     mods.SetLoadingPaused(true);
     var pausedRoot = new ModLibrary(modsRoot).RuntimeDirectory();
     Assert(pausedRoot != modsRoot && !Directory.EnumerateFileSystemEntries(pausedRoot).Any() && mods.List().Single().Enabled,
@@ -408,6 +422,8 @@ try
     Assert(mods.Replacement(secondMod)?.Key == installedMod.Key, "A matching package is detected before replacement");
     var replacementMod = mods.Install(secondMod, replace: true, CancellationToken.None);
     Assert(!replacementMod.Enabled && replacementMod.Key == installedMod.Key, "Updates preserve enabled state and package identity");
+    Assert(replacementMod.Group == "Test group" && replacementMod.DisplayLabel == "Preferred name",
+        "Package updates preserve group and note labels");
     mods.SetEnabled(replacementMod.Key, true);
     Assert(File.ReadAllText(Path.Combine(modsRoot, installedMod.Key, "module", "description.txt")) == "new", "The replacement is made active");
     Assert(mods.Modules(replacementMod.Key).Single().Enabled == false, "Package replacement preserves module-level choices");

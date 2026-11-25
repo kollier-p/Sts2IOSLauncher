@@ -430,6 +430,7 @@ public static class Entry
             var list = snapshots.List();
             var choices = new List<Choice> { new("new", "Create snapshot", "Back up the current saves and settings") };
             choices.Add(new("transfer", "Transfer a save slot", "Copy between normal and modded saves"));
+            choices.Add(new("retention", "Snapshot retention", snapshots.RetentionLimit() is int limit ? $"Keep the latest {limit}" : "Keep all snapshots"));
             choices.AddRange(list.Select(backup => new Choice(backup.Id,
                 backup.Created.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), $"{backup.Reason} · {backup.Files} files")));
             var selection = await Ask("snapshot", "Save snapshots", ct, choices.ToArray());
@@ -441,11 +442,21 @@ public static class Entry
                     : new("idle", "Save snapshot created.");
             }
             if (selection == "transfer") return await TransferSaveSlotAsync(snapshots, ct);
+            if (selection == "retention") return await SetSnapshotRetentionAsync(snapshots, ct);
             if (!list.Any(backup => backup.Id == selection)) throw new InvalidDataException("Invalid snapshot selection.");
             var action = await Ask("snapshot-action", "Save snapshot", ct,
                 [new("keep", "Keep current saves", "Return to the launcher"),
                  new("export", "Export ZIP", "Save an Android-compatible snapshot in Launcher files"),
+                 new("delete", "Delete snapshot", "Remove this backup from the launcher"),
                  new("restore", "Back up and restore", "Save the current state before restoring this snapshot")]);
+            if (action == "delete")
+            {
+                var confirm = await Ask("snapshot-delete", "Delete this save snapshot?", ct,
+                    [new("keep", "Keep snapshot", ""), new("delete", "Delete snapshot", "")]);
+                if (confirm != "delete") return new("idle", "Save snapshot kept.");
+                snapshots.Delete(selection, ct);
+                return new("idle", "Save snapshot deleted.");
+            }
             if (action == "export")
             {
                 Publish(new("snapshots", "Verifying and exporting saves…"));
@@ -457,6 +468,25 @@ public static class Entry
             snapshots.Restore(selection, ct);
             return new("idle", "Save snapshot restored.");
         }) ? 0 : -1;
+
+    static async Task<State> SetSnapshotRetentionAsync(SaveSnapshots snapshots, CancellationToken ct)
+    {
+        var choice = await Ask("snapshot-retention", "How many snapshots should this profile keep?", ct,
+            [new("all", "Keep all", ""), new("5", "Keep 5", ""), new("10", "Keep 10", ""),
+             new("20", "Keep 20", ""), new("50", "Keep 50", "")]);
+        if (choice == "all")
+        {
+            snapshots.SetRetentionLimit(null, ct);
+            return new("idle", "Keeping all snapshots.");
+        }
+        if (!int.TryParse(choice, NumberStyles.None, CultureInfo.InvariantCulture, out var limit) || limit is < 1 or > 50)
+            throw new InvalidDataException("Invalid snapshot retention.");
+        var confirm = await Ask("snapshot-retention-confirm", $"Keep the {limit} most recent snapshots?", ct,
+            [new("keep", "Keep current setting", ""), new("apply", "Apply limit and remove older backups", "")]);
+        if (confirm != "apply") return new("idle", "Snapshot retention settings kept.");
+        snapshots.SetRetentionLimit(limit, ct);
+        return new("idle", $"Keeping the {limit} most recent snapshots.");
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BeginSnapshotImport(nint input)
@@ -688,9 +718,10 @@ public static class Entry
             var paused = library.LoadingPaused;
             var choices = new List<Choice> { new("loading", paused ? "Resume mod loading" : "Pause mod loading",
                 "Applies to this mod folder at the next launch"),
-                new("presets", "Mod presets", "Save and switch package and module settings") };
-            choices.AddRange(installed.Select(mod => new Choice(mod.Key, mod.Label,
-                $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")));
+                new("presets", "Mod presets", "Save and switch package and module settings"),
+                new("search", "Search this mod folder", "Find a package by name, note, or module ID"),
+                new("groups", "Browse groups", "Filter installed packages by group") };
+            choices.AddRange(installed.Select(ModChoice));
             var selected = await Ask("mod", "Installed mod packages", ct, choices.ToArray());
             if (selected == "presets") return await BrowseModPresetsAsync(library, ct);
             if (selected == "loading")
@@ -699,14 +730,48 @@ public static class Entry
                 library.SetLoadingPaused(!paused);
                 return new("idle", paused ? "Mod loading will resume at next launch." : "Mod loading is paused.");
             }
+            if (selected == "search")
+            {
+                var query = (await Ask("mod-search", "Search installed packages", ct)).Trim();
+                installed = installed.Where(mod => mod.Label.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    mod.DisplayLabel.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    mod.ModuleIds.Any(id => id.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+            }
+            else if (selected == "groups")
+            {
+                var groups = installed.Select(mod => mod.Group).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                if (groups.Length == 0) return new("idle", "Install a mod package to create groups.");
+                var group = await Ask("mod-groups", "Mod groups", ct, groups.Select((item, index) =>
+                    new Choice(index.ToString(CultureInfo.InvariantCulture), item ?? "Ungrouped", "")).ToArray());
+                if (!int.TryParse(group, NumberStyles.None, CultureInfo.InvariantCulture, out var index) || index >= groups.Length)
+                    throw new InvalidDataException("Invalid mod group.");
+                installed = installed.Where(mod => string.Equals(mod.Group, groups[index], StringComparison.OrdinalIgnoreCase)).ToArray();
+            }
+            if (selected is "search" or "groups")
+            {
+                if (installed.Count == 0) return new("idle", "No installed packages match.");
+                selected = await Ask("mod-matches", "Matching mod packages", ct, installed.Select(ModChoice).ToArray());
+            }
             var mod = installed.SingleOrDefault(item => item.Key == selected)
                 ?? throw new InvalidDataException("The selected mod is unavailable.");
-            var action = await Ask("mod-action", mod.Label, ct,
+            var action = await Ask("mod-action", mod.DisplayLabel, ct,
                 [new("toggle", mod.Enabled ? "Disable package" : "Enable package", "Apply to the selected profile's mod directory"),
                  new("modules", "Modules and dependencies", "Review versions and module status"),
+                 new("group", "Set group", mod.Group ?? "Ungrouped"),
+                 new("note", "Set note", mod.Note ?? "Use the package name"),
                  new("remove", "Remove package", "Delete the files installed with this package")]);
             ct.ThrowIfCancellationRequested();
             if (action == "modules") return await BrowseModModulesAsync(library, mod, ct);
+            if (action is "group" or "note")
+            {
+                var group = action == "group";
+                var value = (await Ask(group ? "mod-group-name" : "mod-note",
+                    group ? "Enter a group name. Leave blank to ungroup." : "Enter a display note. Leave blank to use the package name.", ct)).Trim();
+                if (value.Length > (group ? 64 : 96) || value.Any(char.IsControl)) return new("error", "Enter a shorter name without control characters.");
+                ct.ThrowIfCancellationRequested();
+                var updated = library.SetPresentation(mod.Key, group ? value : mod.Group, group ? mod.Note : value);
+                return new("idle", $"Updated {updated.DisplayLabel}.");
+            }
             if (action == "toggle")
             {
                 library.SetEnabled(selected, !mod.Enabled);
@@ -720,6 +785,14 @@ public static class Entry
             library.Remove(selected);
             return new("idle", "Mod package removed.");
         }) ? 0 : -1;
+
+    static Choice ModChoice(InstalledMod mod)
+    {
+        var detail = $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}";
+        if (mod.Group is not null) detail += $" · {mod.Group}";
+        if (mod.Note is not null) detail = $"{mod.Label}\n{detail}";
+        return new(mod.Key, mod.DisplayLabel, detail);
+    }
 
     static async Task<State> BrowseModPresetsAsync(ModLibrary library, CancellationToken ct)
     {

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Globalization;
 using System.Text.Json;
 
 namespace Launcher.Core;
@@ -10,6 +11,7 @@ public sealed class SaveSnapshots(string saves, string backups)
     const string Metadata = "snapshot.json";
     readonly string live = Path.GetFullPath(saves);
     readonly string root = Path.GetFullPath(backups);
+    string RetentionFile => Payload.SafePath(root, ".retention");
     sealed record SnapshotManifest(SaveSnapshot Snapshot, Dictionary<string, string> Hashes);
 
     public IReadOnlyList<SaveSnapshot> List()
@@ -26,13 +28,59 @@ public sealed class SaveSnapshots(string saves, string backups)
         return snapshots.OrderByDescending(snapshot => snapshot.Created).ToArray();
     }
 
+    public int? RetentionLimit()
+    {
+        try
+        {
+            if (!File.Exists(RetentionFile)) return null;
+            return int.TryParse(File.ReadAllText(RetentionFile), NumberStyles.None, CultureInfo.InvariantCulture, out var count) &&
+                count is >= 1 and <= 50 ? count : null;
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException) { return null; }
+    }
+
+    public void SetRetentionLimit(int? limit, CancellationToken ct)
+    {
+        if (limit is < 1 or > 50) throw new ArgumentOutOfRangeException(nameof(limit));
+        using var operation = Lock(live);
+        ct.ThrowIfCancellationRequested();
+        if (limit is null)
+        {
+            if (File.Exists(RetentionFile)) File.Delete(RetentionFile);
+            return;
+        }
+        Directory.CreateDirectory(root);
+        var temporary = RetentionFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var file = new FileStream(temporary, FileMode.CreateNew))
+            {
+                file.Write(System.Text.Encoding.ASCII.GetBytes(limit.Value.ToString(CultureInfo.InvariantCulture)));
+                file.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, RetentionFile, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        Prune();
+    }
+
+    public void Delete(string id, CancellationToken ct)
+    {
+        if (!ValidId(id)) throw new InvalidDataException("Invalid save snapshot identifier.");
+        using var operation = Lock(live);
+        ct.ThrowIfCancellationRequested();
+        Directory.Delete(Payload.SafePath(root, id), recursive: true);
+    }
+
     public SaveSnapshot? Create(string reason, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         if (!Directory.Exists(live) && !Directory.Exists(Previous(live))) return null;
         using var operation = Lock(live);
         Recover(live);
-        return CreateBackup(reason, ct);
+        var created = CreateBackup(reason, ct);
+        if (created is not null) Prune(created.Id);
+        return created;
     }
 
     public SaveSnapshot Restore(string id, CancellationToken ct = default)
@@ -50,6 +98,7 @@ public sealed class SaveSnapshots(string saves, string backups)
                 verified.Any(pair => !manifest.Hashes.TryGetValue(pair.Key, out var hash) || hash != pair.Value))
                 throw new InvalidDataException("The save snapshot failed verification.");
             SwapIn(stage, "Before restore", ct);
+            Prune();
             return manifest.Snapshot;
         }
         finally { if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true); }
@@ -74,6 +123,7 @@ public sealed class SaveSnapshots(string saves, string backups)
         {
             var (snapshot, hashes) = SaveSnapshotArchive.Read(path, Path.Combine(stage, "files"), id, ct);
             CommitBackup(stage, snapshot, hashes, ct);
+            Prune(snapshot.Id);
             return snapshot;
         }
         finally { if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true); }
@@ -137,8 +187,20 @@ public sealed class SaveSnapshots(string saves, string backups)
                 File.Copy(source, output, overwrite: true);
             }
             SwapIn(stage, reason, ct);
+            Prune();
         }
         finally { if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true); }
+    }
+
+    void Prune(string? keep = null)
+    {
+        if (RetentionLimit() is not int limit) return;
+        var backups = List().Where(snapshot => snapshot.Id != keep);
+        foreach (var snapshot in backups.Skip(keep is null ? limit : limit - 1))
+        {
+            try { Directory.Delete(Payload.SafePath(root, snapshot.Id), recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException) { }
+        }
     }
 
     void SwapIn(string stage, string backupReason, CancellationToken ct)
