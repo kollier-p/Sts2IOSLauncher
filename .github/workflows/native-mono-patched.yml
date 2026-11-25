@@ -27,6 +27,7 @@ on:
       - 'scripts/build_native_mono.py'
       - 'scripts/stage_ios_runtime.py'
       - 'scripts/build_godot_host.py'
+      - 'scripts/build_texture_encoder.py'
       - 'scripts/validate_native_app.py'
       - 'scripts/stage_extensions.py'
       - 'scripts/integrate_extensions.py'
@@ -60,7 +61,8 @@ jobs:
       - name: Link independent game runtime framework binary
         run: |
           mkdir -p .native-build/framework
-          xcrun --sdk iphoneos clang++ -dynamiclib -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc native/GameRuntime.mm native/JitProbe.mm native/LaunchRequest.mm native/Keychain.mm .native-build/mono-patched/MonoJitMemory.o $(for f in .native-build/mono-patched/mono/mini/libmonosgen-2.0.a .native-build/mono-patched/mono/mini/libmono-component-*-static.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework Security -lz -liconv -Wl,-install_name,@rpath/sts2.framework/sts2 -o .native-build/framework/sts2
+          python3 scripts/build_texture_encoder.py .native-build/texture-encoder
+          xcrun --sdk iphoneos clang++ -dynamiclib -arch arm64 -miphoneos-version-min=16.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c++17 -fobjc-arc native/GameRuntime.mm native/JitProbe.mm native/LaunchRequest.mm native/Keychain.mm .native-build/mono-patched/MonoJitMemory.o -Wl,-force_load,.native-build/texture-encoder/libtexture_encoder.a $(for f in .native-build/mono-patched/mono/mini/libmonosgen-2.0.a .native-build/mono-patched/mono/mini/libmono-component-*-static.a; do printf '%s ' "-Wl,-force_load,$f"; done) -framework Foundation -framework Security -lz -liconv -Wl,-install_name,@rpath/sts2.framework/sts2 -o .native-build/framework/sts2
           xcrun lipo -verify_arch arm64 .native-build/framework/sts2
       - name: Stage pinned iOS managed runtime
         run: python3 scripts/stage_ios_runtime.py .native-build/runtime-distribution

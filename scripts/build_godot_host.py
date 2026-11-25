@@ -86,6 +86,7 @@ def main():
         embed_extensions(frameworks, fixtures, fixtures=True)
     fw=frameworks/"sts2.framework";fw.mkdir(exist_ok=True)
     shutil.copy2(WORK/"framework/sts2",fw/"sts2")
+    shutil.copytree(WORK/"texture-encoder/notices",fw/"TextureEncoderNotices",dirs_exist_ok=True)
     (fw/"Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable":"sts2","CFBundleIdentifier":"org.sts2mobile.ioslauncher.runtime","CFBundlePackageType":"FMWK","CFBundleVersion":"1","CFBundleShortVersionString":"1.0","MinimumOSVersion":"16.0"}))
     mode = "--extension-fixtures" if args.extension_fixtures else "--extensions" if args.extensions else "--diagnostic"
     run(sys.executable,ROOT/"scripts/validate_native_app.py",app,mode,"--report",variant/"pre-ipa-report.json")

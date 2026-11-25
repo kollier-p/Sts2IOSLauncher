@@ -75,6 +75,7 @@ try
         f.Position=(long)offset;Assert(r.ReadByte()==10,"Placeholder data");
     }
     Assert(File.ReadAllBytes(pckPath).SequenceEqual(bytes),"Original pack unchanged");
+    TexturePackTests.Run(root, Assert);
     var extensionConfig="[configuration]\nentry_symbol = \"fmod_library_init\"\n[libraries]\nwindows.x86_64 = \"res://fmod.dll\"\nios.release = \"old.framework\"\n[dependencies]\nios = { \"old.a\": \"\" }\n";
     var rewritten=PckExtensions.RewriteDescriptor(extensionConfig,"fmod_library_init");
     Assert(rewritten.Contains("ios.arm64 = \"res://native/Sts2Fmod.framework\"")&&!rewritten.Contains("old.framework")&&!rewritten.Contains("old.a")&&rewritten.Contains("windows.x86_64"),"iOS FMOD framework descriptor");
@@ -230,13 +231,14 @@ try
     Assert(options.Load() is { FrameLimit: null, TouchAsMouse: null, RenderWarmup: true, ExtendedWarmup: true },
         "Startup preload defaults to extended while frame rate and touch follow the game");
     File.WriteAllText(optionSettings, """{"FrameLimit":60}""");
-    Assert(options.Load() is { FrameLimit: 60, RenderWarmup: true, ExtendedWarmup: true }, "Older settings inherit extended preload");
+    Assert(options.Load() is { FrameLimit: 60, RenderWarmup: true, ExtendedWarmup: true, OptimizeTextures: true },
+        "Older settings inherit extended preload and iPad texture optimization");
     File.WriteAllText(optionSettings, """{"RenderWarmup":false}""");
     Assert(!options.Load().RenderWarmup, "An older preload opt-out still disables the pass");
     var standard = new GameLaunchOptions(60, true, ExtendedWarmup: false);
     options.Save(standard);
     Assert(options.Load() == standard, "Standard preload survives a restart");
-    var overrides = new GameLaunchOptions(120, false, RenderWarmup: false);
+    var overrides = new GameLaunchOptions(120, false, RenderWarmup: false, OptimizeTextures: false);
     options.Save(overrides);
     Assert(new GameLaunchOptionsStore(optionSettings).Load() == overrides, "Launch settings and preload opt-out survive a restart");
     Reject(() => options.Save(new GameLaunchOptions(800)));

@@ -6,6 +6,8 @@ The iPad launcher supports Steam Guard, saved Steam sessions, branch and manifes
 
 The ARM64 build links Godot with patched Mono and verifies unsigned IPA packaging. Enabled extensions, signing, and an iPad are required for end-to-end launch testing. Supply game files through your Steam account or your own Windows archive.
 
+On first Play for each installed version, the launcher can convert supported desktop textures to ASTC 4×4 for the iPad GPU. It shows progress, resumes after an interruption, and reuses the finished pack on later launches. Textures that fail the quality check stay in their original format. **Optimize textures for iPad** in Launch settings controls this step. The original installation stays available for Safe launch.
+
 Run the core and host checks with .NET 9.
 
 ```sh

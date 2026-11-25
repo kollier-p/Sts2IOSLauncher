@@ -609,7 +609,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     NSDictionary *state=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if(![state isKindOfClass:NSDictionary.class])return;
     NSString *stage=state[@"Stage"];NSString *message=state[@"Message"];
-    self.canContinueInBackground=[@[@"auth",@"resolve",@"download",@"process",@"import",@"mods",@"cloud",@"webdav",@"snapshots"] containsObject:stage] ||
+    self.canContinueInBackground=[@[@"auth",@"resolve",@"download",@"process",@"import",@"mods",@"cloud",@"webdav",@"snapshots",@"textures"] containsObject:stage] ||
         ([stage isEqual:@"prompt"] &&
         [@[@"confirm",@"code"] containsObject:state[@"Prompt"]]);
     if(!self.canContinueInBackground) [self endLauncherBackgroundTask];
@@ -651,7 +651,9 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
         NSString *transferred=[NSByteCountFormatter stringFromByteCount:[state[@"Completed"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
         NSString *expected=[NSByteCountFormatter stringFromByteCount:[state[@"Total"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
         message=[message stringByAppendingFormat:@"\n%@ / %@",transferred,expected];
-    }else if(total>0) message=[message stringByAppendingFormat:@"\n%.1f / %.1f MiB",done/1048576,total/1048576];
+    }else if(total>0){
+        if(![stage isEqual:@"textures"])message=[message stringByAppendingFormat:@"\n%.1f / %.1f MiB",done/1048576,total/1048576];
+    }
     else if(done>0) message=[message stringByAppendingFormat:@"\n%.1f MiB imported",done/1048576];
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];

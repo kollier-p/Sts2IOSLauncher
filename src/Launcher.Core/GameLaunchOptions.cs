@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Launcher.Core;
 
 public sealed record GameLaunchOptions(int? FrameLimit = null, bool? TouchAsMouse = null,
-    bool RenderWarmup = true, bool ExtendedWarmup = true);
+    bool RenderWarmup = true, bool ExtendedWarmup = true, bool OptimizeTextures = true);
 
 public sealed class GameLaunchOptionsStore(string path)
 {

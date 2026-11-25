@@ -331,6 +331,10 @@ public static class Entry
                 if (confirmation != "remove") return new("idle", "Version kept.");
                 Publish(new("remove", "Removing the inactive installation…"));
                 payloads.RemoveVersion(selection, ct);
+                var adapters = RuntimeAdapterDirectory(payloads, selection);
+                try { if (Directory.Exists(adapters)) Directory.Delete(adapters, recursive: true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                { HostDiagnostics.Error("remove cached runtime files", error); }
                 return new("idle", "Inactive version removed.");
             }
             if (action != "activate" || selected.InventorySha256 is null)
@@ -478,6 +482,7 @@ public static class Entry
                  new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
                     { null => "Game setting", true => "On", false => "Off" }),
                  new("warmup", "Startup asset preload", preloadMode),
+                 new("texture-optimization", "Optimize textures for iPad", currentOptions.OptimizeTextures ? "On" : "Off"),
                  new("reset", "Restore defaults", "Restore default launch settings")]);
             if (action == "fps")
             {
@@ -504,6 +509,13 @@ public static class Entry
                      new("off", "Off", "Use normal game startup")]);
                 currentOptions = currentOptions with { RenderWarmup = value != "off", ExtendedWarmup = value == "extended" };
                 retryExtended = value == "extended";
+            }
+            else if (action == "texture-optimization")
+            {
+                var value = await Ask("texture-optimization", "Optimize textures for iPad", ct,
+                    [new("yes", "On", "Convert desktop textures once per installed version"),
+                     new("no", "Off", "Use the installed textures")]);
+                currentOptions = currentOptions with { OptimizeTextures = value == "yes" };
             }
             else if (action == "reset")
             {
@@ -1534,6 +1546,29 @@ public static class Entry
             if (!await SyncBeforePlayAsync(cloud, ct))
                 return new("idle", "Launch cancelled. Use WebDAV save sync to review the connection or conflicts.");
         }
+        var launchPack = plan.Pack;
+        if (!safeMode && launchOptions.OptimizeTextures && OperatingSystem.IsIOS())
+        {
+            try
+            {
+                using var encoder = new IosTextureEncoder();
+                int converted = 0;
+                launchPack = PckTextureOptimizer.Prepare(plan.Pack, adapter, plan.Receipt.PckSha256,
+                    (source, destination) => CopyLaunchPack(source, destination, ct), encoder.Convert,
+                    (done, total, optimized) =>
+                    {
+                        converted = optimized;
+                        Publish(new("textures", $"Optimizing textures for iPad… {done:N0} of {total:N0}", done, total));
+                    }, ct);
+                if (launchPack != plan.Pack)
+                    HostDiagnostics.Stage(converted == 0 ? "using cached iPad texture pack" : $"optimized {converted} game textures for iPad");
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or
+                EntryPointNotFoundException or DllNotFoundException or InvalidOperationException)
+            {
+                HostDiagnostics.Error("prepare iPad textures; using installed pack", error);
+            }
+        }
         Publish(new("verify", "Preparing runtime files…"));
 
         // Work on a copy so the versioned installation stays verifiable.
@@ -1541,11 +1576,7 @@ public static class Entry
         var temporary = pack + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            if (NativeClone(plan.Pack, temporary, 0) != 0)
-            {
-                PayloadStorage.EnsureCapacity(documents, new FileInfo(plan.Pack).Length);
-                LaunchCopy.Copy(plan.Pack, temporary, ct);
-            }
+            CopyLaunchPack(launchPack, temporary, ct);
             PckScripts.Add(temporary, plan.GameAssembly, ct);
             PckExtensions.Patch(temporary, ct);
             ct.ThrowIfCancellationRequested();
@@ -1568,6 +1599,14 @@ public static class Entry
         HostDiagnostics.Stage($"launch prepared: mods {(launchProfilePaths.ModsPaused ? "paused" : "normal")}, " +
             $"preload {(launchOptions.RenderWarmup ? "enabled" : "off")}");
         return new("ready", "Game verified. Starting Godot…");
+    }
+
+    static void CopyLaunchPack(string source, string destination, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (NativeClone(source, destination, 0) == 0) return;
+        PayloadStorage.EnsureCapacity(Path.GetDirectoryName(destination)!, new FileInfo(source).Length);
+        LaunchCopy.Copy(source, destination, ct);
     }
 
     static async Task<bool> SyncBeforePlayAsync(GameWebDavSync cloud, CancellationToken ct)

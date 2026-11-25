@@ -104,7 +104,13 @@ def validate(app, extensions, fixtures):
     verify_framework(app, "sts2", "_sts2_host_delegate", "_godotsharp_game_main_init",
                      "_sts2_initialize_game_runtime", "_sts2_jit_patch", "_sts2_vault_read",
                      "_sts2_vault_write", "_sts2_vault_clear", "_sts2_webdav_read", "_sts2_webdav_write", "_sts2_webdav_clear",
-                     "_sts2_nexus_read", "_sts2_nexus_write", "_sts2_nexus_clear")
+                     "_sts2_nexus_read", "_sts2_nexus_write", "_sts2_nexus_clear",
+                     "_sts2_texture_encoder_create", "_sts2_texture_encoder_free",
+                     "_sts2_texture_encoder_output_bytes", "_sts2_texture_encoder_convert")
+    notices = app / "Frameworks/sts2.framework/TextureEncoderNotices"
+    for name in ("ASTC-Encoder-LICENSE.txt", "Reference-Encoder-LICENSE.txt", "bcdec-LICENSE.txt"):
+        if not (notices / name).is_file():
+            raise SystemExit(f"Missing texture encoder license: {name}")
     for name in ("libSystem.Native.dylib", "libSystem.Globalization.Native.dylib",
                  "libSystem.IO.Compression.Native.dylib", "libSystem.Net.Security.Native.dylib",
                  "libSystem.Security.Cryptography.Native.Apple.dylib"):
