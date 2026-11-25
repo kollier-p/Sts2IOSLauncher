@@ -3,6 +3,10 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
 using System.Security.Cryptography;
+using SharpCompress.Common;
+using SharpCompress.Compressors.BZip2;
+using SharpCompress.Writers;
+using SharpCompress.Writers.SevenZip;
 
 var root = Path.Combine(Path.GetTempPath(), "sts2-test-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -170,6 +174,24 @@ try
         writer.WriteEntry(new PaxTarEntry(TarEntryType.SymbolicLink, Payload.Required[0]) { LinkName = "/tmp/foreign.pck" });
     Reject(() => ArchiveImport.ImportAsync(store, linkedTar, null, CancellationToken.None).GetAwaiter().GetResult());
     Assert(store.Current() == tar, "A linked TAR entry leaves the current installation intact");
+    var bzipPath = Path.Combine(root, "Bzip backup.tar.bz2");
+    using (var target = File.Create(bzipPath))
+    using (var bzip = BZip2Stream.Create(target, SharpCompress.Compressors.CompressionMode.Compress, decompressConcatenated: true))
+        TarFile.CreateFromDirectory(archiveInput, bzip, includeBaseDirectory: true);
+    var bzipImport = ArchiveImport.ImportAsync(store, bzipPath, null, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(bzipImport.DisplayName() == "Bzip backup" && store.VerifyForLaunch().Receipt == bzipImport, "Import a bzip2-compressed TAR");
+    var sevenZipPath = Path.Combine(root, "Game archive.7z");
+    using (var target = File.Create(sevenZipPath))
+    using (var writer = WriterFactory.OpenWriter(target, ArchiveType.SevenZip, new SevenZipWriterOptions(CompressionType.LZMA2)))
+    {
+        foreach (var item in Payload.Required)
+        {
+            using var source = File.OpenRead(Path.Combine(archiveInput, item));
+            writer.Write("SteamLibrary/Game/" + item, source, DateTime.UtcNow);
+        }
+    }
+    var sevenZip = ArchiveImport.ImportAsync(store, sevenZipPath, null, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(sevenZip.DisplayName() == "Game archive" && store.VerifyForLaunch().Receipt == sevenZip, "Import the game from a nested 7z");
     Assert(store.ActivateVersion(receipt.PayloadId) == receipt, "Steam version can replace a ZIP selection");
     store.RemoveVersion(imported.PayloadId);
     Assert(!store.InstalledVersions().Contains(imported) && store.Current() == receipt, "Removing an inactive version preserves the active installation");
@@ -272,12 +294,12 @@ try
         using (var extra = new StreamWriter(zip.CreateEntry("module/description.txt").Open())) extra.Write(description);
         return path;
     }
-    using var firstMod = mods.PrepareZipAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
+    using var firstMod = mods.PrepareArchiveAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
     var installedMod = mods.Install(firstMod, replace: false, CancellationToken.None);
     Assert(File.Exists(Path.Combine(modsRoot, installedMod.Key, "module", "TestMod.json")), "Legacy mod manifests get their expected filename");
     Assert(!mods.SetEnabled(installedMod.Key, false).Enabled && !Directory.Exists(Path.Combine(modsRoot, installedMod.Key)),
         "Disabled mods are outside the runtime scan directory");
-    using var secondMod = mods.PrepareZipAsync(CreateModZip("Second mod", "TestMod", "new"), CancellationToken.None).GetAwaiter().GetResult();
+    using var secondMod = mods.PrepareArchiveAsync(CreateModZip("Second mod", "TestMod", "new"), CancellationToken.None).GetAwaiter().GetResult();
     Assert(mods.Replacement(secondMod)?.Key == installedMod.Key, "A matching package is detected before replacement");
     var replacementMod = mods.Install(secondMod, replace: true, CancellationToken.None);
     Assert(!replacementMod.Enabled && replacementMod.Key == installedMod.Key, "Updates preserve enabled state and package identity");
@@ -285,7 +307,7 @@ try
     Assert(File.ReadAllText(Path.Combine(modsRoot, installedMod.Key, "module", "description.txt")) == "new", "The replacement is made active");
     mods.Remove(installedMod.Key);
     Assert(mods.List().Count == 0, "Managed mod removal clears its install directory");
-    Reject(() => mods.PrepareZipAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());
+    Reject(() => mods.PrepareArchiveAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());
     var workshopZip = CreateModZip("Workshop asset", "WorkshopMod", "workshop");
     using (var preparedWorkshop = mods.PrepareDownloadAsync("Workshop listing", (stage, _) =>
     {

@@ -6,7 +6,7 @@ To build with FMOD and Spine after confirming the applicable licenses, use Actio
 
 The extension-enabled build stages ARM64 FMOD and Spine frameworks inside the `.app`. At launch the verified Steam pack is cloned or copied, C# script placeholders are added, and its descriptors point Godot to those frameworks. The workflow validates the extension-enabled app on the runner and keeps the extension binaries out of public artifacts.
 
-The automatic build uploads the diagnostic `.app` as a tar archive and checks IPA packaging on the runner. To download an unsigned diagnostic IPA, run the workflow manually with `package_ipa` enabled. A manual run with both `include_extensions` and `package_ipa` verifies the full IPA on the runner. That run keeps the extension-enabled app and IPA on the runner.
+The automatic build uploads the diagnostic `.app` as a tar archive and checks IPA packaging on the runner. **Build IPA** uploads the unsigned diagnostic IPA by default. With `include_extensions` enabled, it verifies the IPA with both native extensions and uploads a checksum report. The extension-enabled app and IPA stay on the runner.
 
 Automatic CI also builds an app with two small test libraries to check the extension framework layout, install names and exported symbols. The test app disables Play and stays on the runner. Its validation report accompanies the diagnostic app artifact.
 

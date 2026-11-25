@@ -2,7 +2,7 @@
 
 Experimental iPadOS port of [Sts2MobileLauncher](https://github.com/kollier-p/Sts2MobileLauncher). The target is an 11-inch iPad Pro running iPadOS 17.6.3 with JIT enabled.
 
-The iPad launcher supports Steam Guard, saved Steam sessions, branch and manifest selection, verified game downloads, and ZIP and TAR imports. Launch profiles can pin installed versions and isolate saves and mods. The launcher also provides save snapshots, manual Steam Cloud and WebDAV sync, mod ZIP management, Workshop and Nexus imports, and a log viewer.
+The iPad launcher supports Steam Guard, saved Steam sessions, branch and manifest selection, verified game downloads, and game imports from ZIP, 7z, RAR, and supported TAR archives. Launch profiles can pin installed versions and isolate saves and mods. The launcher also provides save snapshots, manual Steam Cloud and WebDAV sync, mod management, Workshop and Nexus imports, and a log viewer.
 
 The ARM64 build links Godot with patched Mono and verifies unsigned IPA packaging. Enabled extensions, signing, and an iPad are required for end-to-end launch testing. Supply game files through your Steam account or your own Windows archive.
 

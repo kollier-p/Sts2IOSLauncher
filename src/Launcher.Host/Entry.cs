@@ -488,7 +488,7 @@ public static class Entry
 
     static async Task<State> ImportModAsync(ModLibrary library, string path, CancellationToken ct, string? label = null)
     {
-        using var incoming = await library.PrepareZipAsync(path, ct, label);
+        using var incoming = await library.PrepareArchiveAsync(path, ct, label);
         return await InstallModAsync(library, incoming, ct);
     }
 
@@ -514,7 +514,7 @@ public static class Entry
             var installed = library.List();
             var choices = installed.Select(mod => new Choice(mod.Key, mod.Label,
                 $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")).ToArray();
-            if (choices.Length == 0) return new("idle", "Import a mod ZIP to get started.");
+            if (choices.Length == 0) return new("idle", "Import a mod archive to get started.");
             var selected = await Ask("mod", "Installed mod packages", ct, choices);
             var mod = installed.SingleOrDefault(item => item.Key == selected)
                 ?? throw new InvalidDataException("The selected mod is unavailable.");
@@ -548,7 +548,7 @@ public static class Entry
             var workshop = new WorkshopFiles(http);
             var item = await workshop.LookupAsync(id.Value, ct);
             var choices = new List<Choice>();
-            if (item.Download is not null) choices.Add(new("direct", "Import public ZIP", $"Workshop item {item.Id}"));
+            if (item.Download is not null) choices.Add(new("direct", "Import public download", $"Workshop item {item.Id}"));
             choices.Add(new("steampipe", "Choose a Steam Workshop version", "Sign in to view available SteamPipe manifests"));
             var action = await Ask("workshop-install", item.Title, ct,
                 choices.ToArray());
@@ -557,9 +557,9 @@ public static class Entry
             var staging = Directory.CreateTempSubdirectory("sts2-workshop-").FullName;
             try
             {
-                var path = Path.Combine(staging, $"{item.Id}.zip");
+                var path = Path.Combine(staging, $"{item.Id}.archive");
                 Publish(new("mods", "Downloading Workshop archive…"));
-                await workshop.DownloadZipAsync(item, path, ct);
+                await workshop.DownloadAsync(item, path, ct);
                 return await ImportModAsync(ActiveMods(), path, ct, item.Title);
             }
             finally { Directory.Delete(staging, recursive: true); }
@@ -678,7 +678,7 @@ public static class Entry
         var staging = Directory.CreateTempSubdirectory("sts2-nexus-").FullName;
         try
         {
-            var path = Path.Combine(staging, $"{file.Id}.zip");
+            var path = Path.Combine(staging, $"{file.Id}.archive");
             Publish(new("mods", "Downloading Nexus archive…"));
             try { await nexus.DownloadAsync(mod.Id, file.Id, authorization, path, ct); }
             catch (HttpRequestException error) when (error.StatusCode is System.Net.HttpStatusCode.Forbidden)
@@ -710,13 +710,9 @@ public static class Entry
                 const double MiB = 1024.0 * 1024;
                 result = new("error", $"This operation needs {Math.Ceiling(error.RequiredBytes / MiB):N0} MiB of free space. {Math.Floor(error.AvailableBytes / MiB):N0} MiB is available.");
             }
-            catch (NotSupportedException) when (operation == "Archive import")
+            catch (NotSupportedException) when (operation is "Archive import" or "Mod import" or "Steam Workshop" or "Nexus Mods")
             {
-                result = new("error", "Choose a ZIP, TAR, or gzip-compressed TAR archive.");
-            }
-            catch (NotSupportedException) when (operation == "Mod import")
-            {
-                result = new("error", "Choose a ZIP containing the mod and its manifest.");
+                result = new("error", "Choose a ZIP, 7z, RAR, or supported TAR archive.");
             }
             catch (Exception error)
             {

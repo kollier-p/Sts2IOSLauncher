@@ -63,7 +63,7 @@ def validate(app, extensions, fixtures):
                  "libSystem.Security.Cryptography.Native.Apple.dylib"):
         verify_device_binary(app / "Frameworks" / name)
     for name in ("Launcher.Host", "Launcher.Core", "Launcher.Steam", "Launcher.Adapters", "SteamKit2",
-                 "System.Private.CoreLib", "STS2JitSupport", "protobuf-net", "protobuf-net.Core"):
+                 "System.Private.CoreLib", "STS2JitSupport", "protobuf-net", "protobuf-net.Core", "SharpCompress"):
         with (app / "Managed" / f"{name}.dll").open("rb") as assembly:
             if assembly.read(2) != b"MZ":
                 raise SystemExit(f"Invalid managed assembly: {name}")

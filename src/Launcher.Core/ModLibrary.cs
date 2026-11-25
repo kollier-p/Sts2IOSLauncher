@@ -39,20 +39,18 @@ public sealed class ModLibrary(string activeDirectory)
         return ReadInstalled();
     }
 
-    public async Task<PreparedImport> PrepareZipAsync(string source, CancellationToken ct, string? displayName = null)
+    public Task<PreparedImport> PrepareArchiveAsync(string source, CancellationToken ct, string? displayName = null)
     {
         ct.ThrowIfCancellationRequested();
-        if (!source.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("Choose a ZIP containing the mod and its manifest.");
-        return await PrepareAsync(Path.GetFileNameWithoutExtension(source), ct,
-            (stage, token) => ExtractZipAsync(source, stage, token), displayName);
+        var format = ArchiveFormats.Detect(source) ?? throw new NotSupportedException("Unsupported mod archive format.");
+        return PrepareAsync(displayName ?? ArchiveFormats.DisplayName(source), ct,
+            (stage, token) => ExtractAsync(source, format, stage, token));
     }
 
     public Task<PreparedImport> PrepareDownloadAsync(string displayName, Func<string, CancellationToken, Task> download,
-        CancellationToken ct) => PrepareAsync(displayName, ct, download, displayName);
+        CancellationToken ct) => PrepareAsync(displayName, ct, download);
 
-    async Task<PreparedImport> PrepareAsync(string name, CancellationToken ct, Func<string, CancellationToken, Task> populate,
-        string? displayName)
+    async Task<PreparedImport> PrepareAsync(string displayName, CancellationToken ct, Func<string, CancellationToken, Task> populate)
     {
         var stage = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N"));
         try
@@ -62,20 +60,20 @@ public sealed class ModLibrary(string activeDirectory)
             var files = Directory.GetFiles(stage, "*", SearchOption.AllDirectories);
             if (files.Any(file => Path.GetFileName(file).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidDataException("Reserved mod package file.");
-            if (files.Length == 1 && files[0].EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            if (files.Length == 1 && ArchiveFormats.Detect(files[0]) is { } format)
             {
-                var nested = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N") + ".zip");
+                var nested = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N") + ".archive");
                 File.Move(files[0], nested);
                 try
                 {
                     Directory.Delete(stage, recursive: true);
                     Directory.CreateDirectory(stage);
-                    await ExtractZipAsync(nested, stage, ct);
+                    await ExtractAsync(nested, format, stage, ct);
                 }
                 finally { File.Delete(nested); }
             }
             var modules = PrepareModules(stage, ct);
-            var label = new string((displayName ?? name).Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
+            var label = new string(displayName.Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
             return new PreparedImport(stage, label.Length == 0 ? modules[0] : label, modules);
         }
         catch
@@ -85,37 +83,40 @@ public sealed class ModLibrary(string activeDirectory)
         }
     }
 
-    static async Task ExtractZipAsync(string source, string stage, CancellationToken ct)
+    static async Task ExtractAsync(string source, ArchiveFormat format, string stage, CancellationToken ct)
     {
-        using var zip = ZipFile.OpenRead(source);
+        const long MaximumSize = 16L * 1024 * 1024 * 1024;
         var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var buffer = new byte[65536];
+        long bytes = 0;
+        async Task WriteEntry(string name, long length, bool regular, Func<Stream> open)
+        {
+            if (!regular || !entries.Add(name) || Path.GetFileName(name).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Duplicate, linked, or reserved mod archive entry.");
+            if (length < 0 || length > MaximumSize - bytes) throw new InvalidDataException("The mod archive is too large.");
+            bytes += length;
+            PayloadStorage.EnsureCapacity(stage, length);
+            await ArchiveImport.CopyEntryAsync(stage, name, open(), length, buffer, null, ct);
+        }
+        if (format != ArchiveFormat.Zip)
+        {
+            await ArchiveFormats.ReadAsync(source, format, WriteEntry, ct);
+            return;
+        }
+        using var zip = ZipFile.OpenRead(source);
         if (zip.Entries.Count > 200_000) throw new InvalidDataException("The mod archive contains too many entries.");
         var size = zip.Entries.Sum(entry => entry.Length);
-        if (size > 16L * 1024 * 1024 * 1024) throw new InvalidDataException("The mod archive is too large.");
+        if (size > MaximumSize) throw new InvalidDataException("The mod archive is too large.");
         PayloadStorage.EnsureCapacity(stage, size);
-        var buffer = new byte[65536];
         foreach (var entry in zip.Entries)
         {
             ct.ThrowIfCancellationRequested();
             if (entry.Name.Length == 0) continue;
             var name = Payload.Normalize(entry.FullName);
-            if ((entry.ExternalAttributes >> 16 & 0xf000) == 0xa000 || !entries.Add(name) ||
-                Path.GetFileName(name).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Duplicate, linked, or reserved mod archive entry.");
-            var path = Payload.SafePath(stage, name);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await using var input = entry.Open();
-            await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            var remaining = entry.Length;
-            while (remaining > 0)
-            {
-                var count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(remaining, buffer.Length)), ct);
-                if (count == 0) throw new InvalidDataException("The mod archive is truncated.");
-                await output.WriteAsync(buffer.AsMemory(0, count), ct);
-                remaining -= count;
-            }
-            if (await input.ReadAsync(buffer.AsMemory(0, 1), ct) != 0)
-                throw new InvalidDataException("A mod file exceeds the declared size.");
+            var mode = (entry.ExternalAttributes >> 16) & 0xf000;
+            Stream? opened = null;
+            try { await WriteEntry(name, entry.Length, mode is 0 or 0x8000, () => opened = entry.Open()); }
+            finally { opened?.Dispose(); }
         }
     }
 

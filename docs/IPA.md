@@ -1,7 +1,7 @@
-# Experimental unsigned IPA
+# ARM64 IPA builds
 
-Use Actions > Build IPA > Run workflow. The macOS 26 Apple Silicon runner installs the .NET 10 iOS workload and uses its default Xcode. This is an initial toolchain choice, not yet a verified compatibility pair. The first run may require pinning the SDK, workload and Xcode together.
+Open **Actions → Build IPA → Run workflow** to build the Godot launcher and package it as an unsigned IPA. With **include_extensions** off, the workflow uploads `STS2IOSLauncher-diagnostic-ipa`. It exercises launcher workflows on a JIT-enabled device. Starting the game requires the FMOD and Spine frameworks.
 
-The build runs .NET 8 core tests first, builds the launcher with signing disabled, packages the app and scans filenames for known game assets and nested archives. The scan is a guardrail, not a proof that arbitrary binaries contain no game data. No Steam account, Apple signing certificate or game files are needed in CI.
+With **include_extensions** on, the workflow builds both frameworks and verifies the unsigned IPA on the runner. The downloadable verification report includes archive size and checksum. The framework binaries and extension-enabled IPA remain on the runner.
 
-Manual builds upload the IPA for seven days. Version tags of the form v1.2.3 also publish a prerelease after the build passes. Do not tag until device validation and dependency licensing review are complete. AltStore metadata and icons are deferred until a real app icon and tested installation exist. Unsigned does not mean directly installable on stock iPadOS. The launcher is not yet a playable game runtime.
+For an installable development IPA, follow the local signing procedure with a profile that includes the target iPad and permits debugging. Check the extension licenses before sharing the signed build. [Native iOS build and signing](EXPERIMENTAL_IPA.md)

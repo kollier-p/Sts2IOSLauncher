@@ -1,5 +1,13 @@
 name: Native Godot pre-IPA build
 on:
+  workflow_call:
+    inputs:
+      include_extensions:
+        type: boolean
+        default: false
+      package_ipa:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       include_extensions:
@@ -26,7 +34,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-pre-ipa-${{ github.ref }}
+  group: native-godot-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
   mono:
@@ -77,7 +85,15 @@ jobs:
         run: |
           build_dir=.native-build
           if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then build_dir+=/licensed-app; fi
-          python3 scripts/package_native_ipa.py "$build_dir/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app"
+          python3 scripts/package_native_ipa.py "$build_dir/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app" --report "$build_dir/ipa-report.json"
+      - uses: actions/upload-artifact@v4
+        if: inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true'
+        with:
+          name: STS2IOSLauncher-extension-verification
+          path: |
+            .native-build/licensed-app/pre-ipa-report.json
+            .native-build/licensed-app/ipa-report.json
+          if-no-files-found: error
       - name: Preserve pre-IPA build output
         if: inputs.include_extensions != true && vars.INCLUDE_NATIVE_EXTENSIONS != 'true'
         run: |
@@ -90,6 +106,7 @@ jobs:
           path: |
             .native-build/staged-app.tar.gz
             .native-build/pre-ipa-report.json
+            .native-build/ipa-report.json
             .native-build/extension-fixture-app/pre-ipa-report.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4

@@ -1,45 +1,16 @@
 name: Build IPA
 on:
   workflow_dispatch:
+    inputs:
+      include_extensions:
+        description: "Build and verify an extension-enabled IPA on the runner for authorized evaluation"
+        type: boolean
+        default: false
 permissions:
   contents: read
-concurrency:
-  group: build-ipa-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
-  baseline:
-    runs-on: xcode-27
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.404
-      - name: Install and inspect iOS toolchain
-        run: |
-          test "$(uname -m)" = arm64
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
-          dotnet --version
-          dotnet workload install ios
-          dotnet workload list
-      - name: Generate official UIKit template
-        run: dotnet new ios -o "$RUNNER_TEMP/ios-baseline"
-      - name: Build unmodified template for ARM64
-        run: |
-          dotnet build "$RUNNER_TEMP/ios-baseline" -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -v:minimal
-      - name: Test launcher without experimental linker settings
-        run: |
-          dotnet build src/Launcher.iOS/Launcher.iOS.csproj -c Release -r ios-arm64 -p:EnableCodeSigning=false -p:CodesignRequireProvisioningProfile=false -p:TrimMode=partial -v:minimal
-      - name: Package and scan launcher
-        run: python3 scripts/package_ipa.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: STS2IOSLauncher-unsigned-ipa
-          path: dist/STS2IOSLauncher.ipa
-          if-no-files-found: error
-          retention-days: 7
+  package:
+    uses: ./.github/workflows/native-mono-patched.yml
+    with:
+      include_extensions: ${{ inputs.include_extensions }}
+      package_ipa: true

@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Formats.Tar;
 using System.IO.Compression;
 
 namespace Launcher.Core;
@@ -9,11 +8,9 @@ public static class ArchiveImport
     public static Task<InstallReceipt> ImportAsync(PayloadStore store, string path,
         Action<long, long>? report, CancellationToken ct)
     {
-        if (path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) return ImportZipAsync(store, path, report, ct);
-        if (path.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)) return ImportTarAsync(store, path, ".tar.gz", report, ct);
-        if (path.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase)) return ImportTarAsync(store, path, ".tgz", report, ct);
-        if (path.EndsWith(".tar", StringComparison.OrdinalIgnoreCase)) return ImportTarAsync(store, path, ".tar", report, ct);
-        throw new NotSupportedException("Choose a ZIP, TAR, or gzip-compressed TAR archive.");
+        ct.ThrowIfCancellationRequested();
+        var format = ArchiveFormats.Detect(path) ?? throw new NotSupportedException("Unsupported archive format.");
+        return format == ArchiveFormat.Zip ? ImportZipAsync(store, path, report, ct) : ImportEntriesAsync(store, path, format, report, ct);
     }
 
     public static async Task<InstallReceipt> ImportZipAsync(PayloadStore store, string path,
@@ -62,7 +59,7 @@ public static class ArchiveImport
                 await CopyEntryAsync(staging, relative, source, entry.Length, buffer,
                     count => report?.Invoke(done += count, total), ct);
             }
-            return store.InstallArchive(staging, ArchiveName(path, Path.GetExtension(path)), ct);
+            return store.InstallArchive(staging, ArchiveName(path), ct);
         }
         finally
         {
@@ -71,13 +68,10 @@ public static class ArchiveImport
         }
     }
 
-    static async Task<InstallReceipt> ImportTarAsync(PayloadStore store, string path, string extension,
+    static async Task<InstallReceipt> ImportEntriesAsync(PayloadStore store, string path, ArchiveFormat format,
         Action<long, long>? report, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        using var file = File.OpenRead(path);
-        using var gzip = extension == ".tar" ? null : new GZipStream(file, CompressionMode.Decompress, leaveOpen: true);
-        using var archive = new TarReader(gzip is null ? file : gzip);
         using var writer = store.AcquireWriteLock();
         var staging = store.NewStaging();
         var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
@@ -87,27 +81,23 @@ public static class ArchiveImport
             var selected = new HashSet<string>(StringComparer.Ordinal);
             var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             long done = 0;
-            while (await archive.GetNextEntryAsync(copyData: false, cancellationToken: ct) is { } entry)
+            await ArchiveFormats.ReadAsync(path, format, async (filePath, size, regular, open) =>
             {
-                if (entry.EntryType == TarEntryType.Directory) continue;
-                var name = entry.Name;
-                while (name.StartsWith("./", StringComparison.Ordinal)) name = name[2..];
-                var filePath = Payload.Normalize(name);
                 var prefixLength = PayloadPrefixLength(filePath);
-                if (prefixLength < 0) continue;
+                if (prefixLength < 0) return;
                 var prefix = filePath[..prefixLength];
                 root ??= prefix;
                 if (prefix != root) throw new InvalidDataException("Select an archive with one Windows game installation.");
                 var relative = filePath[prefixLength..];
-                if (!unique.Add(relative) || entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile))
-                    throw new InvalidDataException("Duplicate or linked payload entry in TAR.");
+                if (!unique.Add(relative) || !regular || size < 0)
+                    throw new InvalidDataException("Duplicate, linked, or invalid game file in archive.");
                 selected.Add(relative);
-                PayloadStorage.EnsureCapacity(store.Root, entry.Length);
-                await CopyEntryAsync(staging, relative, entry.DataStream ?? Stream.Null, entry.Length, buffer,
+                PayloadStorage.EnsureCapacity(store.Root, size);
+                await CopyEntryAsync(staging, relative, open(), size, buffer,
                     count => report?.Invoke(done += count, 0), ct);
-            }
-            if (!Payload.Required.All(selected.Contains)) throw new InvalidDataException("The TAR is missing required game files.");
-            return store.InstallArchive(staging, ArchiveName(path, extension), ct);
+            }, ct);
+            if (!Payload.Required.All(selected.Contains)) throw new InvalidDataException("The archive is missing required game files.");
+            return store.InstallArchive(staging, ArchiveName(path), ct);
         }
         finally
         {
@@ -125,15 +115,15 @@ public static class ArchiveImport
         return assemblyRoot < 0 ? -1 : assemblyRoot + 1;
     }
 
-    static string ArchiveName(string path, string extension)
+    static string ArchiveName(string path)
     {
-        var filename = Path.GetFileName(path)[..^extension.Length];
+        var filename = ArchiveFormats.DisplayName(path);
         var name = new string(filename.Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
         return string.IsNullOrEmpty(name) ? "Imported archive" : name;
     }
 
-    static async Task CopyEntryAsync(string staging, string relative, Stream source, long length,
-        byte[] buffer, Action<int> bytesWritten, CancellationToken ct)
+    internal static async Task CopyEntryAsync(string staging, string relative, Stream source, long length,
+        byte[] buffer, Action<int>? bytesWritten, CancellationToken ct)
     {
         var output = Payload.SafePath(staging, relative);
         Directory.CreateDirectory(Path.GetDirectoryName(output)!);
@@ -145,7 +135,7 @@ public static class ArchiveImport
             written += read;
             if (written > length) throw new InvalidDataException("An archive entry exceeds its declared size.");
             await destination.WriteAsync(buffer.AsMemory(0, read), ct);
-            bytesWritten(read);
+            bytesWritten?.Invoke(read);
         }
         if (written != length) throw new InvalidDataException("An archive entry is truncated.");
     }

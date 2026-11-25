@@ -3,6 +3,8 @@
 
 import argparse
 import datetime
+import hashlib
+import json
 import pathlib
 import plistlib
 import re
@@ -60,7 +62,7 @@ def sign_app(app, profile_path, identity, bundle_identifier):
         raise SystemExit("The packaged app does not have the required development entitlements.")
 
 
-def package(app, output, profile_path=None, identity=None, bundle_identifier=None):
+def package(app, output, profile_path=None, identity=None, bundle_identifier=None, report_path=None):
     info_bytes = (app / "Info.plist").read_bytes()
     info = plistlib.loads(info_bytes)
     if info.get("STS2ExtensionFixtures"):
@@ -84,7 +86,14 @@ def package(app, output, profile_path=None, identity=None, bundle_identifier=Non
     else:
         write_ipa(app, output, info_bytes, extensions, signed=False)
     mode = "development-signed" if profile_path else "unsigned"
-    print(f"Verified {mode} {report['architecture']} IPA ({output.stat().st_size:,} bytes): {output}")
+    size = output.stat().st_size
+    if report_path:
+        with output.open("rb") as archive:
+            checksum = hashlib.file_digest(archive, "sha256").hexdigest()
+        report.update(ipa=output.name, signing=mode, size_bytes=size, sha256=checksum, bundle=info["CFBundleIdentifier"])
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"Verified {mode} {report['architecture']} IPA ({size:,} bytes): {output}")
 
 
 def write_ipa(app, output, info_bytes, extensions, signed):
@@ -122,6 +131,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("dist/STS2IOSLauncher.ipa"))
+    parser.add_argument("--report", type=pathlib.Path, help="write package validation metadata and SHA-256")
     parser.add_argument("--profile", type=pathlib.Path, help="Apple development provisioning profile for the test iPad")
     parser.add_argument("--identity", help="matching Apple Development signing identity in the macOS Keychain")
     parser.add_argument("--bundle-identifier", help="bundle identifier covered by the development profile")
@@ -130,4 +140,4 @@ if __name__ == "__main__":
         parser.error("--profile and --identity must be supplied together")
     if args.bundle_identifier and (not args.profile or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", args.bundle_identifier)):
         parser.error("--bundle-identifier requires development signing and a reverse DNS identifier")
-    package(args.app.resolve(), args.output.resolve(), args.profile, args.identity, args.bundle_identifier)
+    package(args.app.resolve(), args.output.resolve(), args.profile, args.identity, args.bundle_identifier, args.report)

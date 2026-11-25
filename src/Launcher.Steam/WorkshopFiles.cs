@@ -43,10 +43,10 @@ public sealed class WorkshopFiles(HttpClient http)
             PublicTransferUri(url), size is > 0 and <= long.MaxValue ? (long)size.Value : null, Number(item, "hcontent_file"));
     }
 
-    public Task DownloadZipAsync(WorkshopItem item, string path, CancellationToken ct)
+    public Task DownloadAsync(WorkshopItem item, string path, CancellationToken ct)
     {
         if (item.Download is null || PublicTransferUri(item.Download.AbsoluteUri) is not { } uri)
-            throw new NotSupportedException("Steam did not provide a public ZIP download for this item.");
+            throw new NotSupportedException("Steam did not provide a public download for this item.");
         return ModDownloads.FetchAsync(http, uri, path, item.Size, ct);
     }
 

@@ -206,7 +206,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.webDav=[self button:@"WebDAV save sync" action:@selector(webDavPressed)];
     self.steamCloud=[self button:@"Steam Cloud saves" action:@selector(steamCloudPressed)];
     self.mods=[self button:@"Installed mods" action:@selector(modsPressed)];
-    self.importMod=[self button:@"Import mod ZIP" action:@selector(importModPressed)];
+    self.importMod=[self button:@"Import mod archive" action:@selector(importModPressed)];
     self.workshop=[self button:@"Install a Workshop item" action:@selector(workshopPressed)];
     UIButton *workshopWebsite=[self button:@"Browse Steam Workshop" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
@@ -406,17 +406,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [self.application openURL:url options:@{} completionHandler:nil];
 }
 - (void)importModPressed {
-    [self.view endEditing:YES];
-    self.pickingMod=YES;
-    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:NO];
-    picker.delegate=self;
-    [self presentViewController:picker animated:YES completion:nil];
+    [self selectArchiveForMod:YES];
 }
 - (void)importPressed {
+    [self selectArchiveForMod:NO];
+}
+- (void)selectArchiveForMod:(BOOL)mod {
     [self.view endEditing:YES];
-    self.pickingMod=NO;
-    NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
-    for(NSString *extension in @[@"tar",@"gz",@"tgz"]){
+    self.pickingMod=mod;
+    NSMutableArray<UTType *> *types=[NSMutableArray arrayWithArray:@[UTTypeZIP,UTTypeArchive]];
+    for(NSString *extension in @[@"7z",@"rar",@"tar",@"gz",@"tgz",@"bz2",@"tbz",@"tbz2",@"xz",@"txz",@"zst",@"tzst"]){
         UTType *type=[UTType typeWithFilenameExtension:extension];
         if(type && ![types containsObject:type]) [types addObject:type];
     }
