@@ -13,38 +13,34 @@ internal sealed class GameRenderWarmup
 
     static readonly List<object> RetainedAssets = [];
     static bool started;
-    static Task? gamePreload;
     internal static string? CatalogDirectory { private get; set; }
     internal static bool Extended { private get; set; }
 
     readonly Assembly godot;
-    readonly bool extended;
-    readonly bool gpuParticles;
-    readonly TimeSpan timeLimit;
     readonly object owner, tree, root;
     readonly EventInfo processFrame;
     readonly Delegate callback;
     readonly MethodInfo load, exists, listDirectory, addChild, queueFree, isInsideTree, isValid;
     readonly object reuse, childMode, updateOnce, updateAlways, updateDisabled;
     readonly PropertyInfo updateMode, guiDisableInput;
-    readonly string? catalogPath;
-    readonly GameWarmupVisuals visuals;
-    readonly GameWarmupMemory? memory;
+    readonly string? catalogDirectory;
+    string? catalogPath;
+    GameWarmupVisuals visuals = null!;
+    GameWarmupMemory? memory;
     readonly Stopwatch elapsed = Stopwatch.StartNew();
     readonly List<string> available = [];
     readonly HashSet<GameWarmupVisuals.Preview> drawn = [];
     string[] work = [];
     object? overlay, status, progress, viewport;
     bool? originalInputDisabled;
-    bool cachedCatalog, batchHasParticles, waitingForGame;
+    bool initialized, extended, gpuParticles, cachedCatalog, batchHasParticles;
     int nextAsset, loaded, submitted, sceneDraws, particleDraws, failed, waitFrames;
 
     GameRenderWarmup(object owner, Assembly godot)
     {
         this.owner = owner;
         this.godot = godot;
-        extended = Extended;
-        timeLimit = TimeSpan.FromSeconds(extended ? 60 : 12);
+        catalogDirectory = CatalogDirectory;
         var node = Godot("Node");
         tree = node.GetMethod("GetTree", Type.EmptyTypes)!.Invoke(owner, null)!;
         var sceneTree = Godot("SceneTree");
@@ -68,16 +64,6 @@ internal sealed class GameRenderWarmup
         updateAlways = Enum.Parse(updateMode.PropertyType, "Always");
         updateDisabled = Enum.Parse(updateMode.PropertyType, "Disabled");
         guiDisableInput = Godot("Viewport").GetProperty("GuiDisableInput")!;
-        visuals = new GameWarmupVisuals(Godot);
-        if (extended)
-        {
-            var renderingServer = Godot("RenderingServer");
-            memory = new GameWarmupMemory(renderingServer, Godot("RenderingServer+RenderingInfo"));
-            var method = renderingServer.GetMethod("GetCurrentRenderingMethod", Type.EmptyTypes)!.Invoke(null, null) as string;
-            gpuParticles = method is "mobile" or "gl_compatibility" or "forward_plus";
-        }
-        if (CatalogDirectory is { } directory)
-            catalogPath = Path.Combine(directory, extended ? "startup-assets-extended-v1.txt" : "startup-assets-v1.txt");
     }
 
     public static void MainMenuReady(object __instance)
@@ -86,6 +72,7 @@ internal sealed class GameRenderWarmup
         started = true;
         try
         {
+            HostDiagnostics.Stage("game main menu ready for preload");
             var node = __instance.GetType();
             while (node is not null && node.FullName != "Godot.Node") node = node.BaseType;
             if (node is null) throw new TypeLoadException("The game menu is not a Godot node.");
@@ -94,8 +81,6 @@ internal sealed class GameRenderWarmup
         }
         catch (Exception error) { HostDiagnostics.Error("schedule startup preload", error); }
     }
-
-    public static void TrackGamePreload(Task __result) => gamePreload = __result;
 
     Type Godot(string type) => godot.GetType("Godot." + type, throwOnError: true)!;
     object New(string type, params object[] inputs) => Activator.CreateInstance(Godot(type), inputs)!;
@@ -118,7 +103,7 @@ internal sealed class GameRenderWarmup
                 Finish("menu closed");
                 return;
             }
-            if (elapsed.Elapsed > timeLimit)
+            if (elapsed.Elapsed > TimeSpan.FromSeconds(extended ? 60 : 12))
             {
                 Finish("time limit");
                 return;
@@ -126,13 +111,12 @@ internal sealed class GameRenderWarmup
             if (overlay is null)
             {
                 ShowOverlay();
-                RestoreCatalog();
-                if (!cachedCatalog)
-                    work = GameWarmupAssets.Discover(extended, directory => (string[])listDirectory.Invoke(null, [directory])!);
-                Set(progress!, "MaxValue", (double)work.Length);
-                HostDiagnostics.Stage($"startup preload {(extended ? "extended" : "standard")}, " +
-                    $"{(cachedCatalog ? "cached catalog" : "discovering assets")} ({work.Length} candidates)");
-                // Let the loading screen present before any resource load.
+                // Allow the overlay to draw before we inspect assets or use the renderer.
+                return;
+            }
+            if (!initialized)
+            {
+                InitializePreload();
                 return;
             }
             if (waitFrames > 0)
@@ -147,22 +131,6 @@ internal sealed class GameRenderWarmup
             }
             if (nextAsset == work.Length)
             {
-                if (extended && gamePreload is { IsCompleted: false })
-                {
-                    if (memory?.LimitReached() is { } limit)
-                    {
-                        Finish(limit);
-                        return;
-                    }
-                    if (!waitingForGame)
-                    {
-                        waitingForGame = true;
-                        Set(status!, "Text", "Finishing the game’s built-in preload");
-                        Set(progress!, "Indeterminate", true);
-                        HostDiagnostics.Stage("startup preload waiting for game resources");
-                    }
-                    return;
-                }
                 Finish();
                 return;
             }
@@ -194,9 +162,36 @@ internal sealed class GameRenderWarmup
         }
         catch (Exception error)
         {
-            HostDiagnostics.Error("startup preload", error);
-            Finish("error");
+            HostDiagnostics.Error("startup preload", error is TargetInvocationException { InnerException: { } cause } ? cause : error);
+            Finish("error", retryExtended: false);
         }
+    }
+
+    void InitializePreload()
+    {
+        if (Extended)
+        {
+            extended = GameWarmupRecovery.TryBegin(catalogDirectory);
+            HostDiagnostics.Stage(extended ? "startup preload initializing extended renderer" :
+                "startup preload using standard after interrupted or unavailable extended preload");
+        }
+        visuals = new GameWarmupVisuals(Godot);
+        if (extended)
+        {
+            var renderingServer = Godot("RenderingServer");
+            memory = new GameWarmupMemory(renderingServer, Godot("RenderingServer+RenderingInfo"));
+            var method = renderingServer.GetMethod("GetCurrentRenderingMethod", Type.EmptyTypes)!.Invoke(null, null) as string;
+            gpuParticles = method is "mobile" or "gl_compatibility" or "forward_plus";
+        }
+        if (catalogDirectory is { } directory)
+            catalogPath = Path.Combine(directory, extended ? "startup-assets-extended-v1.txt" : "startup-assets-v1.txt");
+        RestoreCatalog();
+        if (!cachedCatalog)
+            work = GameWarmupAssets.Discover(extended, directory => (string[])listDirectory.Invoke(null, [directory])!);
+        Set(progress!, "MaxValue", (double)work.Length);
+        HostDiagnostics.Stage($"startup preload {(extended ? "extended" : "standard")}, " +
+            $"{(cachedCatalog ? "cached catalog" : "discovering assets")} ({work.Length} candidates)");
+        initialized = true;
     }
 
     void ShowOverlay()
@@ -354,7 +349,7 @@ internal sealed class GameRenderWarmup
         return drawable;
     }
 
-    void Finish(string? reason = null)
+    void Finish(string? reason = null, bool retryExtended = true)
     {
         try
         {
@@ -363,6 +358,7 @@ internal sealed class GameRenderWarmup
             if (overlay is not null) queueFree.Invoke(overlay, null);
             if (viewport is not null) queueFree.Invoke(viewport, null);
             if (reason is null) SaveCatalog();
+            if (extended && retryExtended) GameWarmupRecovery.Clear(catalogDirectory);
         }
         catch (Exception error) { HostDiagnostics.Error("close startup preload", error); }
         HostDiagnostics.Stage($"startup preload {(reason is null ? "complete" : $"stopped ({reason})")}: " +

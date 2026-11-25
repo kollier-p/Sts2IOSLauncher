@@ -457,19 +457,26 @@ public static class Entry
     static GameLaunchOptionsStore OptionsStore(PayloadStore payloads) =>
         new(Payload.SafePath(Path.GetDirectoryName(payloads.Root)!, "GameLaunchOptions.json"));
 
+    static string RuntimeAdapterDirectory(PayloadStore payloads, string payloadId) =>
+        Path.Combine(Path.GetDirectoryName(payloads.Root)!, "RuntimeAdapters", payloadId);
+
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseLaunchOptions() => Start("Launch settings", new("settings", "Opening launch settings…"),
         async (payloads, ct) =>
         {
             var options = OptionsStore(payloads);
             var currentOptions = options.Load();
+            var installed = activeProfile?.PayloadId is null ? current : profileVersion;
+            var adapter = installed is null ? null : RuntimeAdapterDirectory(payloads, installed.PayloadId);
+            var preloadMode = !currentOptions.RenderWarmup ? "Off" : !currentOptions.ExtendedWarmup ? "Standard" :
+                GameWarmupRecovery.WasInterrupted(adapter) ? "Standard after interrupted Extended preload" : "Extended";
+            bool retryExtended = false;
             var action = await Ask("launch-options", "Game launch settings", ct,
                 [new("fps", "Frame rate limit", currentOptions.FrameLimit switch
                     { null => "Game setting", 0 => "Uncapped", int fps => $"{fps} FPS" }),
                  new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
                     { null => "Game setting", true => "On", false => "Off" }),
-                 new("warmup", "Startup asset preload",
-                     !currentOptions.RenderWarmup ? "Off" : currentOptions.ExtendedWarmup ? "Extended" : "Standard"),
+                 new("warmup", "Startup asset preload", preloadMode),
                  new("reset", "Restore defaults", "Restore default launch settings")]);
             if (action == "fps")
             {
@@ -495,11 +502,17 @@ public static class Entry
                      new("standard", "Standard", "Prepare a small set of card materials and combat effects"),
                      new("off", "Off", "Use normal game startup")]);
                 currentOptions = currentOptions with { RenderWarmup = value != "off", ExtendedWarmup = value == "extended" };
+                retryExtended = value == "extended";
             }
-            else if (action == "reset") currentOptions = new();
+            else if (action == "reset")
+            {
+                currentOptions = new();
+                retryExtended = true;
+            }
             else throw new InvalidDataException("Choose a launch setting.");
             ct.ThrowIfCancellationRequested();
             options.Save(currentOptions);
+            if (retryExtended) GameWarmupRecovery.Clear(adapter);
             return new("idle", "Game launch settings saved.");
         }) ? 0 : -1;
 
@@ -1445,7 +1458,7 @@ public static class Entry
             return new("error", issue);
         }
         var support = Path.GetDirectoryName(payloads.Root)!;
-        var adapter = Path.Combine(support, "RuntimeAdapters", plan.Receipt.PayloadId);
+        var adapter = RuntimeAdapterDirectory(payloads, plan.Receipt.PayloadId);
         Directory.CreateDirectory(adapter);
         var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
         if (!File.Exists(harmony)) return new("error", "The selected installation is missing its Harmony runtime.");
