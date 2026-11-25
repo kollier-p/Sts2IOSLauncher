@@ -66,17 +66,14 @@ internal sealed class GameRenderWarmup
         guiDisableInput = Godot("Viewport").GetProperty("GuiDisableInput")!;
     }
 
-    public static void MainMenuReady(object __instance)
+    internal static void MainMenuReady(object menu, Assembly godot)
     {
         if (started) return;
         started = true;
         try
         {
             HostDiagnostics.Stage("game main menu ready for preload");
-            var node = __instance.GetType();
-            while (node is not null && node.FullName != "Godot.Node") node = node.BaseType;
-            if (node is null) throw new TypeLoadException("The game menu is not a Godot node.");
-            var warmup = new GameRenderWarmup(__instance, node.Assembly);
+            var warmup = new GameRenderWarmup(menu, godot);
             warmup.processFrame.AddEventHandler(warmup.tree, warmup.callback);
         }
         catch (Exception error) { HostDiagnostics.Error("schedule startup preload", error); }

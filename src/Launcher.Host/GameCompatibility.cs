@@ -19,7 +19,6 @@ internal static class GameCompatibility
     static Type? modSettingsType;
     static bool enableLauncherMods;
     static GameLaunchOptions? pendingLaunchOptions;
-    static Assembly? pendingGame;
     public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release, bool hasEnabledMods)
     {
         profilePaths=paths;releaseInfo=release;
@@ -61,14 +60,10 @@ internal static class GameCompatibility
         if(releaseMethods.Length==1)Patch(releaseMethods[0],typeof(GameCompatibility).GetMethod(nameof(Release),Flags)!.MakeGenericMethod(releaseMethods[0].ReturnType),"postfix");
     }
 
-    static void PatchUnsupportedMouseCalls(Assembly game)
+    static void PatchUnsupportedMouseCalls(Assembly godot)
     {
         try
         {
-            var type = game.GetType("MegaCrit.Sts2.Core.Nodes.NGame");
-            while (type is not null && type.FullName != "Godot.Node") type = type.BaseType;
-            if (type is null) return;
-            var godot = type.Assembly;
             var features = godot.GetType("Godot.DisplayServer+Feature", throwOnError: true)!;
             var hasFeature = godot.GetType("Godot.DisplayServer", throwOnError: true)!.GetMethod("HasFeature", [features])!;
             var input = godot.GetType("Godot.Input", throwOnError: true)!;
@@ -105,7 +100,6 @@ internal static class GameCompatibility
             // entry point returns. Singleton calls such as DisplayServer.HasFeature
             // must wait until a scene is active.
             Patch(ready, typeof(GameCompatibility).GetMethod(nameof(MainMenuReady), Flags)!, "postfix");
-            pendingGame = game;
             pendingLaunchOptions = options;
             HostDiagnostics.Stage("main menu launch options hook installed");
         }
@@ -114,28 +108,29 @@ internal static class GameCompatibility
 
     static void MainMenuReady(object __instance)
     {
-        if (pendingLaunchOptions is not { } options || pendingGame is not { } game) return;
+        if (pendingLaunchOptions is not { } options) return;
         pendingLaunchOptions = null;
-        pendingGame = null;
+        var node = __instance.GetType();
+        while (node is not null && node.FullName != "Godot.Node") node = node.BaseType;
+        if (node is null)
+        {
+            HostDiagnostics.Stage("main menu launch options need a Godot node");
+            return;
+        }
+        var godot = node.Assembly;
         HostDiagnostics.Stage("applying launch options after the game menu opened");
-        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(game);
-        ApplyGodotOptions(options);
+        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(godot);
+        ApplyGodotOptions(options, godot);
         if (options.RenderWarmup)
         {
             GameRenderWarmup.Extended = options.ExtendedWarmup;
-            GameRenderWarmup.MainMenuReady(__instance);
+            GameRenderWarmup.MainMenuReady(__instance, godot);
         }
     }
 
-    static void ApplyGodotOptions(GameLaunchOptions options)
+    static void ApplyGodotOptions(GameLaunchOptions options, Assembly godot)
     {
         if (options.FrameLimit is null && options.TouchAsMouse is null) return;
-        var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");
-        if (godot is null)
-        {
-            HostDiagnostics.Error("load Godot launch options", new FileNotFoundException("GodotSharp"));
-            return;
-        }
         void Set(string type, string name, object value)
         {
             try
