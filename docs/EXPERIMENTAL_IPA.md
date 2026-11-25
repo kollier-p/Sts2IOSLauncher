@@ -1,6 +1,6 @@
 # Native iOS build and validation
 
-The automatic build stops at a validated unsigned `.app`. Use the diagnostic build to test startup, JIT, and Steam downloads. Play requires an extension-enabled build.
+Automatic CI validates the ARM64 iOS app and unsigned IPA packaging. The diagnostic build exercises launcher startup, JIT, and Steam downloads. Play requires an extension-enabled build.
 
 To build with FMOD and Spine after confirming the applicable licenses, use Actions > Native Godot pre-IPA build > Run workflow > include_extensions, or set the repository Actions variable INCLUDE_NATIVE_EXTENSIONS=true to enable that build on pushes. The repository does not include game files or redistribute extension source archives itself. Check the applicable FMOD and Spine terms before sharing an extension-inclusive binary.
 
@@ -10,6 +10,14 @@ The automatic build uploads the diagnostic `.app` as a tar archive and checks IP
 
 Automatic CI also builds an app with two small test libraries to check the extension framework layout, install names and exported symbols. The test app disables Play and stays on the runner. Its validation report accompanies the diagnostic app artifact.
 
-On the iPad, sideload/sign the IPA with the installed jailbreak-compatible method, launch and enable JIT if needed, sign in to Steam, select a branch and download, then select Play installed game. Device launch and gameplay are not yet verified. Report the exact build SHA, iPad model/OS and the logs under Documents/LauncherLogs. Do not share credentials or tokens.
+For local development signing, use an Apple Development certificate in your Mac's Keychain and a provisioning profile that covers the bundle identifier and registers the test iPad. The packaging script verifies the profile and signed debugger entitlement before writing the IPA.
 
-Known remaining limits: actual game/API compatibility across branches, extension linkage and redistribution authorization, Steam networking/cloud/workshop, save/profile selection, Android touch and UI patches, and real device testing. A successful CI compilation is not a gameplay result.
+```sh
+python3 scripts/package_native_ipa.py \
+  .native-build/licensed-app/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app \
+  --profile path/to/Development.mobileprovision \
+  --identity 'Apple Development: Your Name' \
+  --bundle-identifier org.example.sts2ioslauncher
+```
+
+Install the IPA on the registered iPad, enable JIT using the device's existing setup, sign in to Steam, download a game branch, and select Play. Include the build SHA, iPad model and OS, and the log from Tools when reporting device results. Keep Steam and Nexus credentials private.

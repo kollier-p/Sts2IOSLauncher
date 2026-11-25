@@ -1,9 +1,8 @@
 using SteamKit2;
 using SteamKit2.Authentication;
+using SteamKit2.Internal;
 using Launcher.Core;
 using System.Globalization;
-using System.Net;
-using System.Security.Cryptography;
 
 namespace Launcher.Steam;
 
@@ -111,114 +110,73 @@ public sealed class SteamSession : IAsyncDisposable
         if (key.Result != EResult.OK || key.DepotKey.Length == 0) throw new UnauthorizedAccessException("Steam did not authorize access to the Windows depot.");
         var code = await Content.GetManifestRequestCode(Payload.WindowsDepot, Payload.AppId, manifestId, branch);
         if (code == 0) throw new UnauthorizedAccessException("Steam did not grant a manifest request code.");
-        var servers = (await Content.GetServersForSteamPipe()).Where(s => !s.UseAsProxy && !s.SteamChinaOnly && s.Host != null && (s.AllowedAppIds.Length == 0 || s.AllowedAppIds.Contains(Payload.AppId))).OrderBy(s => s.WeightedLoad).Take(8).ToArray();
-        if (servers.Length == 0) throw new IOException("No suitable Steam CDN servers.");
-        using var cdn = new SteamKit2.CDN.Client(client);
-        var authTokens = new System.Collections.Concurrent.ConcurrentDictionary<string, SteamContent.CDNAuthToken>();
-        async Task<T> FromCdn<T>(Func<SteamKit2.CDN.Server, string?, Task<T>> action, CancellationToken token)
-        {
-            Exception? last = null;
-            foreach (var server in servers)
-            {
-                token.ThrowIfCancellationRequested();
-                try
-                {
-                    authTokens.TryGetValue(server.Host!, out var cached);
-                    if (cached is not null && cached.Expiration <= DateTime.UtcNow) cached = null;
-                    try { var value = await action(server, cached?.Token); token.ThrowIfCancellationRequested(); return value; }
-                    catch (SteamKitWebRequestException e) when (e.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
-                    {
-                        var auth = await Content.GetCDNAuthToken(Payload.AppId, Payload.WindowsDepot, server.Host!);
-                        if (auth.Result != EResult.OK || string.IsNullOrEmpty(auth.Token)) throw new UnauthorizedAccessException("Steam CDN authorization rejected.");
-                        token.ThrowIfCancellationRequested();
-                        authTokens[server.Host!] = auth;
-                        var value = await action(server, auth.Token); token.ThrowIfCancellationRequested(); return value;
-                    }
-                }
-                catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or TimeoutException or UnauthorizedAccessException) { last = e; }
-            }
-            throw new IOException("All selected Steam CDN servers failed.", last);
-        }
-        var manifest = await FromCdn((s, t) => cdn.DownloadManifestAsync(Payload.WindowsDepot, manifestId, code, s, key.DepotKey, cdnAuthToken: t), ct);
-        if (manifest.ManifestGID != manifestId || manifest.DepotID != Payload.WindowsDepot || manifest.FilenamesEncrypted || manifest.Files is null) throw new InvalidDataException("Unexpected or encrypted manifest.");
-        var selected = manifest.Files.Where(f => !f.Flags.HasFlag(EDepotFileFlag.Directory)).Select(f => (File: f, Path: Payload.Normalize(f.FileName))).Where(x => Payload.Include(x.Path)).ToArray();
-        if (selected.Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != selected.Length || !Payload.Required.All(p => selected.Any(x => x.Path == p))) throw new InvalidDataException("Duplicate or missing manifest payload files.");
-        foreach (var x in selected) if (!string.IsNullOrEmpty(x.File.LinkTarget) || x.File.Flags.HasFlag(EDepotFileFlag.Symlink)) throw new InvalidDataException("Symlink entries unsupported.");
-        foreach (var x in selected)
-            ChunkLayout.Validate(x.File.TotalSize, x.File.FileHash, x.File.Chunks.Select(c => new ChunkExtent(c.Offset, c.UncompressedLength, c.ChunkID)));
-        long total = selected.Sum(x => checked((long)x.File.TotalSize)), done = 0;
+        var transfer = await SteamDepotTransfer.OpenAsync(client, Content, Payload.WindowsDepot, key.DepotKey, ct);
+        var manifest = await transfer.ManifestAsync(manifestId, code, ct);
+        var files = SteamDepotTransfer.SelectFiles(manifest, Payload.Include);
+        if (!Payload.Required.All(required => files.Any(entry => entry.Path == required)))
+            throw new InvalidDataException("Missing required game files in manifest.");
         // Serialize installers across sessions; the OS releases this lock on process exit.
         using var installLock = store.AcquireWriteLock();
         var staging = Payload.SafePath(store.Root, $"stage-resume-{manifestId}");
-        var remaining = PayloadStorage.RemainingBytes(staging, selected.Select(x => (x.Path, (long)x.File.TotalSize)));
-        PayloadStorage.EnsureCapacity(store.Root, remaining);
-        Directory.CreateDirectory(staging);
-        var progressLock = new object();
-        var meter = new TransferMeter(total);
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        void ReportBytes(long bytes, bool downloaded = false)
-        {
-            lock (progressLock) { var sample = meter.Add(bytes, downloaded, clock.Elapsed); done = sample.Completed; progress?.Report(new("download", done, total, sample.Estimate.BytesPerSecond, sample.Estimate.Remaining)); }
-        }
-        bool processing = false;
+        var processing = false;
         try
         {
-            await Parallel.ForEachAsync(selected, new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = ct }, async (entry, workerToken) =>
-            {
-                var (file, relative) = entry;
-                using var workerCdn = new SteamKit2.CDN.Client(client);
-                workerToken.ThrowIfCancellationRequested();
-                var output = Payload.SafePath(staging, relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!);
-                // Reuse only complete files whose length and Steam manifest hash match.
-                if (File.Exists(output))
-                {
-                    if (DownloadCache.IsVerified(output, checked((long)file.TotalSize), file.FileHash))
-                    {
-                        ReportBytes(checked((long)file.TotalSize));
-                        return;
-                    }
-                }
-                using (var stream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
-                {
-                    ulong cursor = 0;
-                    foreach (var chunk in file.Chunks.OrderBy(c => c.Offset))
-                    {
-                        workerToken.ThrowIfCancellationRequested();
-                        if (chunk.Offset != cursor || chunk.UncompressedLength == 0 || chunk.UncompressedLength > 64 * 1024 * 1024 || cursor > file.TotalSize || chunk.UncompressedLength > file.TotalSize - cursor) throw new InvalidDataException("Invalid chunk bounds or gap.");
-                        var hash = chunk.ChunkID;
-                        if (hash is not { Length: 20 }) throw new InvalidDataException("Missing or invalid Steam chunk hash.");
-                        int length = checked((int)chunk.UncompressedLength);
-                        if (ChunkCache.Verify(stream, checked((long)cursor), length, hash))
-                        {
-                            cursor += (uint)length; ReportBytes(length);
-                            continue;
-                        }
-                        stream.SetLength(checked((long)cursor));
-                        stream.Position = checked((long)cursor);
-                        var data = new byte[length];
-                        var size = await FromCdn(async (s, t) =>
-                        {
-                            var count = await workerCdn.DownloadDepotChunkAsync(Payload.WindowsDepot, chunk, s, data, key.DepotKey, cdnAuthToken: t);
-                            ChunkLayout.VerifyDownloaded(data, count, hash);
-                            return count;
-                        }, workerToken);
-                        await stream.WriteAsync(data, workerToken); cursor += (uint)size; ReportBytes(size, true);
-                    }
-                    if (cursor != file.TotalSize) throw new InvalidDataException("File length mismatch.");
-                    stream.SetLength(checked((long)file.TotalSize));
-                    stream.Flush(true);
-                }
-                using var read = File.OpenRead(output);
-                if (!CryptographicOperations.FixedTimeEquals(SHA1.HashData(read), file.FileHash)) throw new InvalidDataException("Downloaded file hash mismatch.");
-            });
+            var total = await transfer.DownloadAsync(files, staging, 3, progress, ct);
             processing = true;
-            progress?.Report(new("process", done, total));
+            progress?.Report(new("process", total, total));
             var receipt = store.Install(staging, manifestId, branch, ct);
-            progress?.Report(new("readyToRelaunch", done, total)); return receipt;
+            progress?.Report(new("readyToRelaunch", total, total));
+            return receipt;
         }
         finally { if (processing && Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
     void RequireSession() { if (!authenticated) throw new InvalidOperationException("Steam login required."); }
+
+    public async Task<IReadOnlyList<WorkshopManifest>> WorkshopManifestsAsync(WorkshopItem item, CancellationToken ct)
+    {
+        RequireSession();
+        var published = client.GetHandler<SteamUnifiedMessages>()!.CreateService<PublishedFile>();
+        var request = new CPublishedFile_GetItemInfo_Request { appid = Payload.AppId };
+        request.workshop_items.Add(new() { published_file_id = item.Id });
+        var result = await published.GetItemInfo(request).ToTask().WaitAsync(ct);
+        if (result.Result == EResult.AccessDenied || result.Body?.private_items.Contains(item.Id) == true)
+            throw new UnauthorizedAccessException("Steam did not authorize this Workshop item.");
+        var info = result.Result == EResult.OK
+            ? result.Body?.workshop_items.SingleOrDefault(entry => entry.published_file_id == item.Id) : null;
+        var choices = info?.author_snapshots.Where(snapshot => snapshot.manifestid != 0).Select(snapshot =>
+            WorkshopManifest.Snapshot(snapshot.manifestid, snapshot.game_branch_min, snapshot.game_branch_max,
+                snapshot.timestamp, "Author snapshot")).ToList() ?? [];
+        if (choices.Count == 0)
+        {
+            var history = await published.GetChangeHistory(new() { publishedfileid = item.Id, count = 50 }).ToTask().WaitAsync(ct);
+            if (history.Result == EResult.OK)
+                choices.AddRange(history.Body.changes.Where(change => change.saved_snapshot && change.manifest_id != 0)
+                    .Select(change => WorkshopManifest.Snapshot(change.manifest_id, change.snapshot_game_branch_min,
+                        change.snapshot_game_branch_max, change.timestamp, "Change history snapshot")));
+        }
+        if ((info?.manifest_id is > 0 ? info.manifest_id : item.Manifest) is ulong defaultId)
+            choices.Add(new(defaultId, "public", "", "", info?.time_updated ?? 0, "Default manifest"));
+        return choices.DistinctBy(choice => (choice.Id, choice.MinimumBranch, choice.MaximumBranch))
+            .OrderByDescending(choice => choice.Timestamp).ToArray();
+    }
+
+    public async Task DownloadWorkshopManifestAsync(WorkshopManifest selection, string staging, IProgress<DownloadProgress>? progress,
+        CancellationToken ct)
+    {
+        RequireSession();
+        const uint workshopDepot = Payload.AppId;
+        var code = await Content.GetManifestRequestCode(workshopDepot, Payload.AppId, selection.Id, selection.Branch).WaitAsync(ct);
+        if (code == 0) throw new UnauthorizedAccessException("Steam did not authorize this Workshop manifest or branch.");
+        var key = await Apps.GetDepotDecryptionKey(workshopDepot, Payload.AppId).ToTask().WaitAsync(ct);
+        if (key.Result != EResult.OK || key.DepotKey.Length == 0)
+            throw new UnauthorizedAccessException("Steam did not authorize access to the Workshop depot.");
+        var transfer = await SteamDepotTransfer.OpenAsync(client, Content, workshopDepot, key.DepotKey, ct);
+        var manifest = await transfer.ManifestAsync(selection.Id, code, ct);
+        var files = SteamDepotTransfer.SelectFiles(manifest, _ => true);
+        if (files.Length is 0 or > 200_000 || files.Sum(file => checked((long)file.File.TotalSize)) > 16L * 1024 * 1024 * 1024)
+            throw new InvalidDataException("The Workshop download is empty or exceeds the supported size.");
+        await transfer.DownloadAsync(files, staging, 2, progress, ct);
+    }
 
     public SteamCloudSaves OpenCloud(HttpClient http)
     {

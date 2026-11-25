@@ -52,6 +52,67 @@ static Status copyStatus;
 - (void)cancelPressed { self.cancelSelection(); }
 @end
 
+@interface LauncherDiagnostics : UIViewController
+@property(nonatomic,copy) NSURL *logURL;
+@property(nonatomic,strong) UITextView *output;
+@end
+
+@implementation LauncherDiagnostics
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title=@"Launcher log";
+    self.view.backgroundColor=UIColor.systemBackgroundColor;
+    self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+        target:self action:@selector(closeLog)];
+    self.navigationItem.rightBarButtonItems=@[
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(shareLog:)],
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(refreshLog)]
+    ];
+    self.output=[UITextView new];
+    self.output.editable=NO;
+    self.output.font=[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    self.output.translatesAutoresizingMaskIntoConstraints=NO;
+    [self.view addSubview:self.output];
+    UILayoutGuide *guide=self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.output.topAnchor constraintEqualToAnchor:guide.topAnchor],
+        [self.output.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor],
+        [self.output.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
+        [self.output.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor]
+    ]];
+    [self refreshLog];
+}
+- (void)refreshLog {
+    NSFileHandle *file=[NSFileHandle fileHandleForReadingFromURL:self.logURL error:nil];
+    unsigned long long length=0;
+    NSString *text=nil;
+    if([file seekToEndReturningOffset:&length error:nil]){
+        const NSUInteger limit=256*1024;
+        BOOL clipped=length>limit;
+        if([file seekToOffset:clipped?length-limit:0 error:nil]){
+            NSData *data=[file readDataUpToLength:limit error:nil];
+            if(clipped && data.length>0){
+                const uint8_t *bytes=(const uint8_t *)data.bytes;
+                NSUInteger start=0;
+                while(start<data.length && bytes[start++]!='\n') {}
+                data=[data subdataWithRange:NSMakeRange(start,data.length-start)];
+            }
+            text=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        }
+        [file closeAndReturnError:nil];
+    }
+    self.output.text=text.length?text:@"No launcher log is available yet.";
+    self.navigationItem.rightBarButtonItems.firstObject.enabled=text.length>0;
+    [self.output scrollRangeToVisible:NSMakeRange(self.output.text.length,0)];
+}
+- (void)shareLog:(UIBarButtonItem *)sender {
+    UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[self.logURL] applicationActivities:nil];
+    share.popoverPresentationController.barButtonItem=sender;
+    [self presentViewController:share animated:YES completion:nil];
+}
+- (void)closeLog { [self dismissViewControllerAnimated:YES completion:nil]; }
+@end
+
 __attribute__((visibility("default")))
 @interface LauncherGate : UIViewController<UIDocumentPickerDelegate>
 @property(nonatomic,strong) id service;
@@ -61,7 +122,7 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
@@ -149,6 +210,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.workshop=[self button:@"Install a Workshop item" action:@selector(workshopPressed)];
     UIButton *workshopWebsite=[self button:@"Browse Steam Workshop" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
+    self.diagnostics=[self button:@"Launcher log" action:@selector(logPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
@@ -158,15 +220,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
     downloadStyle.title=@"Sign in & install game";
     self.download.configuration=downloadStyle;
 
-    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods"]];
+    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods",@"Tools"]];
     navigation.selectedSegmentIndex=0;
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
-    self.sections=@[playSection,installSection,savesSection,modsSection];
-    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,self.progress,self.message,self.cancel]];
+    UIStackView *toolsSection=[self section:@[self.diagnostics]];
+    self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
+    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
     stack.translatesAutoresizingMaskIntoConstraints=NO;
     [self sectionChanged:navigation];
@@ -176,7 +239,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     preferredWidth.priority=UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
-    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=NO;
+    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -239,6 +302,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.play.enabled=idle && installed!=nil && profile!=nil;
     self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
+    self.diagnostics.enabled=idle;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -330,6 +394,13 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
 - (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
+- (void)logPressed {
+    NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    LauncherDiagnostics *viewer=[LauncherDiagnostics new];
+    viewer.logURL=[documents URLByAppendingPathComponent:@"LauncherLogs/launcher.log"];
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:viewer];
+    [self presentViewController:navigation animated:YES completion:nil];
+}
 - (void)workshopWebsitePressed {
     NSURL *url=[NSURL URLWithString:@"https://steamcommunity.com/app/2868840/workshop/"];
     [self.application openURL:url options:@{} completionHandler:nil];

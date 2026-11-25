@@ -489,6 +489,11 @@ public static class Entry
     static async Task<State> ImportModAsync(ModLibrary library, string path, CancellationToken ct, string? label = null)
     {
         using var incoming = await library.PrepareZipAsync(path, ct, label);
+        return await InstallModAsync(library, incoming, ct);
+    }
+
+    static async Task<State> InstallModAsync(ModLibrary library, ModLibrary.PreparedImport incoming, CancellationToken ct)
+    {
         var previous = library.Replacement(incoming);
         if (previous is not null)
         {
@@ -542,11 +547,13 @@ public static class Entry
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
             var workshop = new WorkshopFiles(http);
             var item = await workshop.LookupAsync(id.Value, ct);
-            if (item.Download is null)
-                return new("error", "Steam offers no public ZIP for this item. SteamPipe Workshop downloads are pending.");
+            var choices = new List<Choice>();
+            if (item.Download is not null) choices.Add(new("direct", "Import public ZIP", $"Workshop item {item.Id}"));
+            choices.Add(new("steampipe", "Choose a Steam Workshop version", "Sign in to view available SteamPipe manifests"));
             var action = await Ask("workshop-install", item.Title, ct,
-                [new("cancel", "Cancel", "Return to the launcher"), new("install", "Download and import", $"Workshop item {item.Id}")]);
-            if (action != "install") return new("idle", "Workshop import cancelled.");
+                choices.ToArray());
+            if (action == "steampipe") return await WorkshopSteamPipeAsync(item, ct);
+            if (action != "direct" || item.Download is null) return new("idle", "Workshop import cancelled.");
             var staging = Directory.CreateTempSubdirectory("sts2-workshop-").FullName;
             try
             {
@@ -557,6 +564,51 @@ public static class Entry
             }
             finally { Directory.Delete(staging, recursive: true); }
         }) ? 0 : -1;
+
+    static async Task<State> WorkshopSteamPipeAsync(WorkshopItem item, CancellationToken ct)
+    {
+        var saved = SteamVault.Load();
+        var user = saved is null ? (await Ask("steam-user", "Enter your Steam account name", ct)).Trim() : saved.AccountName;
+        var password = saved is null ? await Ask("steam-password", "Enter your Steam password", ct) : "";
+        if (user.Length == 0 || (saved is null && password.Length == 0)) return new("error", "Enter your Steam account name and password.");
+        Publish(new("auth", "Signing in to Steam Workshop…"));
+        await using var session = new SteamSession();
+        if (saved is null) await session.AuthenticateAsync(user, password, new Guard(ct), null, false, ct);
+        else await session.LogOnAsync(saved, true, ct);
+        Publish(new("mods", "Reading available Workshop versions…"));
+        var manifests = (await session.WorkshopManifestsAsync(item, ct)).ToList();
+        if (manifests.Count == 0) return new("error", "Steam returned no accessible Workshop versions.");
+        var installed = activeProfile?.PayloadId is null ? current : profileVersion;
+        if (installed?.DepotId == Payload.WindowsDepot)
+        {
+            var matching = WorkshopManifest.ResolveBranch(manifests, installed.Branch);
+            if (matching is not null)
+            {
+                manifests.RemoveAll(manifest => manifest.Id == matching.Id && manifest.MinimumBranch == matching.MinimumBranch &&
+                    manifest.MaximumBranch == matching.MaximumBranch);
+                manifests.Insert(0, matching);
+            }
+            else if (installed.Branch != "public" && manifests.Find(manifest => manifest.Source == "Default manifest") is { } fallback)
+            {
+                manifests.Add(fallback with { Branch = installed.Branch, Source = "Default manifest requested for installed branch" });
+            }
+        }
+        var choices = manifests.Select((manifest, index) => new Choice(index.ToString(CultureInfo.InvariantCulture),
+            $"{manifest.Branch} · {manifest.Source}",
+            manifest.MinimumBranch.Length == 0 && manifest.MaximumBranch.Length == 0 ? $"{manifest.Id}" :
+                $"{manifest.Id} · {manifest.MinimumBranch} to {manifest.MaximumBranch}")).ToArray();
+        var selected = await Ask("workshop-manifest", item.Title, ct, choices);
+        if (!int.TryParse(selected, NumberStyles.None, CultureInfo.InvariantCulture, out var selection) || selection >= manifests.Count)
+            return new("error", "Choose an available Workshop version.");
+        var library = ActiveMods();
+        var progress = new DirectProgress<DownloadProgress>(value =>
+            Publish(new("mods", "Downloading Workshop files…", value.Completed, value.Total, value.BytesPerSecond,
+                value.Remaining?.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture))));
+        Publish(new("mods", "Requesting Workshop files from Steam…"));
+        using var incoming = await library.PrepareDownloadAsync(item.Title,
+            (stage, token) => session.DownloadWorkshopManifestAsync(manifests[selection], stage, progress, token), ct);
+        return await InstallModAsync(library, incoming, ct);
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseNexus() => Start("Nexus Mods", new("mods", "Opening Nexus Mods…"), BrowseNexusAsync) ? 0 : -1;

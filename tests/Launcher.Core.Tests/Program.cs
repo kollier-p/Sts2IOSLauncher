@@ -268,7 +268,7 @@ try
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
         using (var manifest = new StreamWriter(zip.CreateEntry("module/mod_manifest.json").Open()))
             manifest.Write(System.Text.Json.JsonSerializer.Serialize(new { id }));
-        using (var pack = zip.CreateEntry("module/TestMod.pck").Open()) pack.Write("GDPC"u8);
+        using (var pack = zip.CreateEntry("module/" + (id == "../invalid" ? "TestMod" : id) + ".pck").Open()) pack.Write("GDPC"u8);
         using (var extra = new StreamWriter(zip.CreateEntry("module/description.txt").Open())) extra.Write(description);
         return path;
     }
@@ -286,6 +286,16 @@ try
     mods.Remove(installedMod.Key);
     Assert(mods.List().Count == 0, "Managed mod removal clears its install directory");
     Reject(() => mods.PrepareZipAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());
+    var workshopZip = CreateModZip("Workshop asset", "WorkshopMod", "workshop");
+    using (var preparedWorkshop = mods.PrepareDownloadAsync("Workshop listing", (stage, _) =>
+    {
+        File.Copy(workshopZip, Path.Combine(stage, "downloaded.zip"));
+        return Task.CompletedTask;
+    }, CancellationToken.None).GetAwaiter().GetResult())
+    {
+        Assert(preparedWorkshop.ModuleIds.SequenceEqual(new[] { "WorkshopMod" }) && preparedWorkshop.Label == "Workshop listing",
+            "A SteamPipe download containing a single ZIP uses the same mod pipeline");
+    }
     using var nexusHandler = new NexusFixture();
     using var nexusHttp = new HttpClient(nexusHandler);
     var nexus = new NexusMods(nexusHttp, "fixture");

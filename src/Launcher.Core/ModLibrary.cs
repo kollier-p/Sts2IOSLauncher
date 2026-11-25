@@ -44,48 +44,78 @@ public sealed class ModLibrary(string activeDirectory)
         ct.ThrowIfCancellationRequested();
         if (!source.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             throw new NotSupportedException("Choose a ZIP containing the mod and its manifest.");
+        return await PrepareAsync(Path.GetFileNameWithoutExtension(source), ct,
+            (stage, token) => ExtractZipAsync(source, stage, token), displayName);
+    }
+
+    public Task<PreparedImport> PrepareDownloadAsync(string displayName, Func<string, CancellationToken, Task> download,
+        CancellationToken ct) => PrepareAsync(displayName, ct, download, displayName);
+
+    async Task<PreparedImport> PrepareAsync(string name, CancellationToken ct, Func<string, CancellationToken, Task> populate,
+        string? displayName)
+    {
         var stage = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N"));
         try
         {
             Directory.CreateDirectory(stage);
-            using var zip = ZipFile.OpenRead(source);
-            var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (zip.Entries.Count > 200_000) throw new InvalidDataException("The mod archive contains too many entries.");
-            var size = zip.Entries.Sum(entry => entry.Length);
-            if (size > 16L * 1024 * 1024 * 1024) throw new InvalidDataException("The mod archive is too large.");
-            PayloadStorage.EnsureCapacity(stage, size);
-            var buffer = new byte[65536];
-            foreach (var entry in zip.Entries)
+            await populate(stage, ct);
+            var files = Directory.GetFiles(stage, "*", SearchOption.AllDirectories);
+            if (files.Any(file => Path.GetFileName(file).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("Reserved mod package file.");
+            if (files.Length == 1 && files[0].EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             {
-                ct.ThrowIfCancellationRequested();
-                if (entry.Name.Length == 0) continue;
-                var name = Payload.Normalize(entry.FullName);
-                if ((entry.ExternalAttributes >> 16 & 0xf000) == 0xa000 || !entries.Add(name) ||
-                    Path.GetFileName(name).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException("Duplicate, linked, or reserved mod archive entry.");
-                var path = Payload.SafePath(stage, name);
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                await using var input = entry.Open();
-                await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                var remaining = entry.Length;
-                while (remaining > 0)
+                var nested = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N") + ".zip");
+                File.Move(files[0], nested);
+                try
                 {
-                    var count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(remaining, buffer.Length)), ct);
-                    if (count == 0) throw new InvalidDataException("The mod archive is truncated.");
-                    await output.WriteAsync(buffer.AsMemory(0, count), ct);
-                    remaining -= count;
+                    Directory.Delete(stage, recursive: true);
+                    Directory.CreateDirectory(stage);
+                    await ExtractZipAsync(nested, stage, ct);
                 }
-                if (await input.ReadAsync(buffer.AsMemory(0, 1), ct) != 0)
-                    throw new InvalidDataException("A mod file exceeds the declared size.");
+                finally { File.Delete(nested); }
             }
             var modules = PrepareModules(stage, ct);
-            var label = new string((displayName ?? Path.GetFileNameWithoutExtension(source)).Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
+            var label = new string((displayName ?? name).Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
             return new PreparedImport(stage, label.Length == 0 ? modules[0] : label, modules);
         }
         catch
         {
             if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true);
             throw;
+        }
+    }
+
+    static async Task ExtractZipAsync(string source, string stage, CancellationToken ct)
+    {
+        using var zip = ZipFile.OpenRead(source);
+        var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (zip.Entries.Count > 200_000) throw new InvalidDataException("The mod archive contains too many entries.");
+        var size = zip.Entries.Sum(entry => entry.Length);
+        if (size > 16L * 1024 * 1024 * 1024) throw new InvalidDataException("The mod archive is too large.");
+        PayloadStorage.EnsureCapacity(stage, size);
+        var buffer = new byte[65536];
+        foreach (var entry in zip.Entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (entry.Name.Length == 0) continue;
+            var name = Payload.Normalize(entry.FullName);
+            if ((entry.ExternalAttributes >> 16 & 0xf000) == 0xa000 || !entries.Add(name) ||
+                Path.GetFileName(name).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Duplicate, linked, or reserved mod archive entry.");
+            var path = Payload.SafePath(stage, name);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await using var input = entry.Open();
+            await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            var remaining = entry.Length;
+            while (remaining > 0)
+            {
+                var count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(remaining, buffer.Length)), ct);
+                if (count == 0) throw new InvalidDataException("The mod archive is truncated.");
+                await output.WriteAsync(buffer.AsMemory(0, count), ct);
+                remaining -= count;
+            }
+            if (await input.ReadAsync(buffer.AsMemory(0, 1), ct) != 0)
+                throw new InvalidDataException("A mod file exceeds the declared size.");
         }
     }
 
@@ -276,7 +306,7 @@ public sealed class ModLibrary(string activeDirectory)
             if (legacy && !normalized.Equals(manifest, StringComparison.OrdinalIgnoreCase))
                 File.Move(manifest, normalized, overwrite: false);
         }
-        if (ids.Count == 0) throw new InvalidDataException("The ZIP has no mod manifests with a managed DLL or resource pack.");
+        if (ids.Count == 0) throw new InvalidDataException("The package has no mod manifests with a managed DLL or resource pack.");
         return ids.Order(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 

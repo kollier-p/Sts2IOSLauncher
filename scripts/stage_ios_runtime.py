@@ -24,5 +24,7 @@ def main():
             else: continue
             target.parent.mkdir(parents=True,exist_ok=True)
             with z.open(name) as src,target.open("wb") as out: shutil.copyfileobj(src,out)
+            if p.suffix == ".dylib":
+                target.chmod(0o755)
     if not (dest/"Managed/System.Private.CoreLib.dll").is_file(): raise SystemExit("Missing CoreLib")
 if __name__=="__main__": main()

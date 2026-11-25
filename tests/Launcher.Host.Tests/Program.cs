@@ -79,6 +79,16 @@ Check(WorkshopFiles.ParseId("18446744073709551615") == ulong.MaxValue, "Workshop
 Check(WorkshopFiles.ParseId("https://steamcommunity.com/sharedfiles/filedetails/?id=456&searchtext=test") == 456,
     "Workshop item links resolve to their item ID");
 Check(WorkshopFiles.ParseId("https://other.example/sharedfiles/filedetails/?id=456") is null, "Only Steam Community item links are accepted");
+var workshopBranches = new[]
+{
+    WorkshopManifest.Snapshot(100, "public", "public-beta", 50, "Author snapshot"),
+    WorkshopManifest.Snapshot(101, "public-beta", "public-beta", 70, "Author snapshot"),
+    new WorkshopManifest(102, "public", "", "", 80, "Default manifest")
+};
+Check(WorkshopManifest.ResolveBranch(workshopBranches, "public-beta")?.Id == 101 &&
+    WorkshopManifest.ResolveBranch(workshopBranches, "public")?.Id == 100 &&
+    WorkshopManifest.ResolveBranch(workshopBranches, "unknown") is null,
+    "Workshop author snapshots preserve branch bounds and do not mislabel the default manifest");
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 

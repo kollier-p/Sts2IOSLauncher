@@ -4,7 +4,7 @@ using Launcher.Core;
 
 namespace Launcher.Steam;
 
-public sealed record WorkshopItem(ulong Id, string Title, Uri? Download, long? Size);
+public sealed record WorkshopItem(ulong Id, string Title, Uri? Download, long? Size, ulong? Manifest);
 
 public sealed class WorkshopFiles(HttpClient http)
 {
@@ -40,7 +40,7 @@ public sealed class WorkshopFiles(HttpClient http)
         var url = String(item, "file_url");
         var size = Number(item, "file_size");
         return new(id, string.IsNullOrWhiteSpace(title) ? $"Workshop {id}" : title,
-            PublicTransferUri(url), size is > 0 and <= long.MaxValue ? (long)size.Value : null);
+            PublicTransferUri(url), size is > 0 and <= long.MaxValue ? (long)size.Value : null, Number(item, "hcontent_file"));
     }
 
     public Task DownloadZipAsync(WorkshopItem item, string path, CancellationToken ct)
