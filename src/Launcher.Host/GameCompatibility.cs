@@ -112,7 +112,9 @@ internal static class GameCompatibility
 
     static void MainMenuReady(object __instance)
     {
-        if (pendingLaunchOptions is not { } options) return;
+        var options = pendingLaunchOptions;
+        bool ios = OperatingSystem.IsIOS();
+        if (options is null && !ios) return;
         pendingLaunchOptions = null;
         var game = pendingGame;
         pendingGame = null;
@@ -124,8 +126,14 @@ internal static class GameCompatibility
             return;
         }
         var godot = node.Assembly;
+        if (ios)
+        {
+            try { GameSession.ObserveMainMenu(__instance, godot); }
+            catch (Exception error) { HostDiagnostics.Error("observe game main menu", error); }
+        }
+        if (options is null) return;
         HostDiagnostics.Stage("applying launch options after the game menu opened");
-        if (OperatingSystem.IsIOS())
+        if (ios)
         {
             ConfigureSessionControls(__instance, godot, game);
             if (!pendingSafeMode) PatchUnsupportedMouseCalls(godot);
@@ -152,12 +160,21 @@ internal static class GameCompatibility
         {
             // Some game versions skip SceneTree.Quit on mobile. Keep their original
             // save/quit code and show the launcher when it has completed.
-            var gameQuit = game?.GetType("MegaCrit.Sts2.Core.Nodes.NGame")?.GetMethod("Quit", Flags,
+            var gameType = game?.GetType("MegaCrit.Sts2.Core.Nodes.NGame");
+            var gameQuit = gameType?.GetMethod("Quit", Flags,
                 binder: null, types: Type.EmptyTypes, modifiers: null);
-            if (gameQuit?.ReturnType == typeof(void))
-                Patch(gameQuit, typeof(GameSession).GetMethod(nameof(GameSession.GameQuitPostfix))!, "postfix");
-            else if (gameQuit?.ReturnType == typeof(Task))
-                Patch(gameQuit, typeof(GameSession).GetMethod(nameof(GameSession.AsyncGameQuitPostfix))!, "postfix");
+            if (gameQuit is not null && (gameQuit.ReturnType == typeof(void) || gameQuit.ReturnType == typeof(Task)))
+            {
+                Patch(gameQuit, typeof(GameSession).GetMethod(nameof(GameSession.GameQuitPrefix))!);
+                var postfix = gameQuit.ReturnType == typeof(void) ? nameof(GameSession.GameQuitPostfix) :
+                    nameof(GameSession.AsyncGameQuitPostfix);
+                Patch(gameQuit, typeof(GameSession).GetMethod(postfix)!, "postfix");
+            }
+
+            var launchMenu = gameType?.GetMethod("LaunchMainMenu", Flags,
+                binder: null, types: [typeof(bool)], modifiers: null);
+            if (launchMenu?.ReturnType == typeof(Task))
+                Patch(launchMenu, typeof(GameSession).GetMethod(nameof(GameSession.LaunchMainMenuPrefix))!);
         }
         catch (Exception error) { HostDiagnostics.Error("configure game quit", error); }
 

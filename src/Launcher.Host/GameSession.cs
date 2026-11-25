@@ -1,14 +1,55 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace Launcher.Host;
 
 internal static class GameSession
 {
-    public static bool SceneQuitPrefix(int __0) => __0 != 0 || !TryReturn();
+    static WeakReference<object>? mainMenu;
+    static MethodInfo? isValid, isMenuVisible;
 
-    public static void GameQuitPostfix() => TryReturn();
+    internal static void ObserveMainMenu(object menu, Assembly godot)
+    {
+        var node = godot.GetType("Godot.Node", throwOnError: true)!;
+        var canvas = godot.GetType("Godot.CanvasItem", throwOnError: true)!;
+        var godotObject = godot.GetType("Godot.GodotObject", throwOnError: true)!;
+        isValid = godotObject.GetMethod("IsInstanceValid", [godotObject])!;
+        isMenuVisible = canvas.IsInstanceOfType(menu)
+            ? canvas.GetMethod("IsVisibleInTree", Type.EmptyTypes)!
+            : node.GetMethod("IsInsideTree", Type.EmptyTypes)!;
+        mainMenu = new(menu);
+        HostDiagnostics.Stage("game main menu ready");
+    }
 
-    public static void AsyncGameQuitPostfix(Task __result) => _ = ReturnAfterQuitAsync(__result);
+    static bool MainMenuVisible()
+    {
+        try
+        {
+            return mainMenu?.TryGetTarget(out var menu) == true &&
+                isValid?.Invoke(null, [menu]) is true && isMenuVisible?.Invoke(menu, null) is true;
+        }
+        catch (Exception error) { HostDiagnostics.Error("check game main menu for quit", error); return false; }
+    }
+
+    public static bool SceneQuitPrefix(int __0) => __0 != 0 || !MainMenuVisible() || !TryReturn();
+
+    public static void GameQuitPrefix(out bool __state)
+    {
+        __state = MainMenuVisible();
+        HostDiagnostics.Stage(__state ? "game quit requested from main menu" : "game quit requested outside main menu");
+    }
+
+    public static void GameQuitPostfix(bool __state)
+    {
+        if (__state) TryReturn();
+    }
+
+    public static void AsyncGameQuitPostfix(Task __result, bool __state)
+    {
+        if (__state) _ = ReturnAfterQuitAsync(__result);
+    }
+
+    public static void LaunchMainMenuPrefix() => HostDiagnostics.Stage("game loading its main menu");
 
     static async Task ReturnAfterQuitAsync(Task quit)
     {
