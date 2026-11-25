@@ -116,12 +116,13 @@ var subscriptionRequest = WorkshopFiles.SubscriptionRequest(accountId, 2);
 Check(subscriptionRequest.steamid == accountId && subscriptionRequest.appid == Launcher.Core.Payload.AppId &&
     subscriptionRequest.type == "mysubscriptions" && subscriptionRequest.sortmethod == "subscriptiondate" && subscriptionRequest.page == 2,
     "Workshop subscriptions query the signed-in account and preserve subscription ordering");
-var subscriptions = new SteamKit2.Internal.CPublishedFile_GetUserFiles_Response { total = 91 };
+var subscriptions = new SteamKit2.Internal.CPublishedFile_GetUserFiles_Response { total = 151 };
 subscriptions.publishedfiledetails.Add(new() { publishedfileid = 123, consumer_appid = Launcher.Core.Payload.AppId, title = "Subscribed fixture" });
 subscriptions.publishedfiledetails.Add(new() { publishedfileid = 456, consumer_appid = 1 });
 subscriptions.publishedfiledetails.Add(new() { publishedfileid = 789, consumer_appid = Launcher.Core.Payload.AppId, banned = true });
+subscriptions.publishedfiledetails.Add(new() { publishedfileid = 987 });
 var subscriptionPage = WorkshopFiles.SubscriptionPage(2, subscriptions);
-Check(subscriptionPage.Index == 2 && subscriptionPage.Pages == 4 && subscriptionPage.Items.Single().Id == 123,
+Check(subscriptionPage.Index == 2 && subscriptionPage.Pages == 4 && subscriptionPage.Items.Select(item => item.Id).SequenceEqual(new ulong[] { 123, 987 }),
     "Subscription pagination follows Steam's total even when entries are filtered");
 Check(new SteamLogOnException(SteamKit2.EResult.Expired).RequiresSignIn &&
     !new SteamLogOnException(SteamKit2.EResult.ServiceUnavailable).RequiresSignIn,

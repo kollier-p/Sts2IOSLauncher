@@ -18,6 +18,7 @@ public static class Entry
     static LaunchProfiles? profiles;
     static LaunchProfile? activeProfile;
     static LaunchProfilePaths? launchProfilePaths;
+    static bool launchHasEnabledMods;
     static GameLaunchOptions launchOptions = new();
     static GameWebDavSync? gameWebDav;
     static string documents = "", managed = "";
@@ -464,6 +465,7 @@ public static class Entry
                     { null => "Game setting", 0 => "Uncapped", int fps => $"{fps} FPS" }),
                  new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
                     { null => "Game setting", true => "On", false => "Off" }),
+                 new("warmup", "Startup render warmup", currentOptions.RenderWarmup ? "On" : "Off"),
                  new("reset", "Restore game defaults", "Use the installed game's options")]);
             if (action == "fps")
             {
@@ -481,6 +483,13 @@ public static class Entry
                     [new("default", "Game setting", ""), new("yes", "On", "Send mouse clicks for touch input"),
                      new("no", "Off", "Send touch input directly")]);
                 currentOptions = currentOptions with { TouchAsMouse = value == "yes" ? true : value == "no" ? false : null };
+            }
+            else if (action == "warmup")
+            {
+                var value = await Ask("launch-warmup", "Startup render warmup", ct,
+                    [new("on", "On", "Warm selected card materials and UI textures after the renderer starts"),
+                     new("off", "Off", "Use normal game startup")]);
+                currentOptions = currentOptions with { RenderWarmup = value == "on" };
             }
             else if (action == "reset") currentOptions = new();
             else throw new InvalidDataException("Choose a launch setting.");
@@ -988,30 +997,45 @@ public static class Entry
     {
         var page = 1;
         var title = session is null ? "Workshop" : "My subscriptions";
+        WorkshopPage? results = null;
+        string? feedback = null;
         while (true)
         {
-            Publish(new("mods", session is null ? "Loading Steam Workshop…" : "Loading your Workshop subscriptions…"));
-            WorkshopPage results;
-            try { results = await load(page, ct); }
-            catch (Exception error) when (session is not null && error is IOException or TimeoutException)
+            if (results is null || results.Index != page)
             {
-                HostDiagnostics.Error("Workshop subscriptions", error);
-                return new("error", "Could not load your Workshop subscriptions. Try again.");
+                Publish(new("mods", session is null ? "Loading Steam Workshop…" : "Loading your Workshop subscriptions…"));
+                try { results = await load(page, ct); }
+                catch (Exception error) when (session is not null && error is IOException or TimeoutException)
+                {
+                    HostDiagnostics.Error("Workshop subscriptions", error);
+                    return new("error", "Could not load your Workshop subscriptions. Try again.");
+                }
             }
-            var choices = results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary,
-                item.Thumbnail?.AbsoluteUri)).ToList();
+            var choices = new List<Choice>();
+            if (feedback is not null) choices.Add(new("", feedback, ""));
             if (results.Index > 1) choices.Add(new("previous", "Previous page", ""));
             if (results.Index < results.Pages) choices.Add(new("next", "Next page", ""));
+            choices.AddRange(results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary,
+                item.Thumbnail?.AbsoluteUri)));
             if (choices.Count == 0) return new("idle", session is null ? "Steam Workshop returned no matching items." :
                 "You have no available Workshop subscriptions for Slay the Spire 2.");
             var selection = await Ask("workshop-page", $"{title} · Page {results.Index} of {Math.Max(1, results.Pages)}", ct, choices.ToArray());
-            if (selection == "previous") page = Math.Max(1, results.Index - 1);
-            else if (selection == "next") page = checked(results.Index + 1);
+            if (selection == "previous") { page = Math.Max(1, results.Index - 1); feedback = null; }
+            else if (selection == "next") { page = checked(results.Index + 1); feedback = null; }
             else if (WorkshopFiles.ParseId(selection) is ulong selected && results.Items.Any(item => item.Id == selected))
-                return await OpenWorkshopItemAsync(workshop, selected, ct, session);
+            {
+                try { feedback = (await OpenWorkshopItemAsync(workshop, selected, ct, session)).Message; }
+                catch (Exception error) when (error is InvalidDataException or IOException or HttpRequestException or TimeoutException or UnauthorizedAccessException)
+                {
+                    HostDiagnostics.Error($"Workshop item {selected}", error);
+                    feedback = error is InvalidDataException ? WorkshopDataError(error) : "Steam could not finish the Workshop installation. Try again.";
+                }
+            }
             else return new("idle", "Workshop browsing cancelled.");
         }
     }
+
+    static string WorkshopDataError(Exception error) => new(error.Message.Where(character => !char.IsControl(character)).Take(240).ToArray());
 
     static async Task<State> OpenWorkshopItemAsync(WorkshopFiles workshop, ulong id, CancellationToken ct, SteamSession? session = null)
     {
@@ -1043,13 +1067,13 @@ public static class Entry
     static async Task<State> InstallWorkshopItemAsync(WorkshopFiles workshop, WorkshopItem item, WorkshopOrigin? previous,
         CancellationToken ct, SteamSession? session = null)
     {
-        var choices = new List<Choice>();
+        var choices = new List<Choice> { new("steampipe", "Install from Steam", "Use the branch of the current game installation") };
         if (item.Download is not null && (previous is null || previous.Manifest is null))
             choices.Add(new("direct", "Import public download", $"Workshop item {item.Id}"));
-        choices.Add(new("steampipe", "Choose a Steam Workshop version", "View available SteamPipe manifests"));
+        choices.Add(new("back", "Back to Workshop", ""));
         var action = await Ask("workshop-install", item.Title, ct, choices.ToArray());
         if (action == "steampipe") return await WorkshopSteamPipeAsync(item, previous?.Branch, ct, session);
-        if (action != "direct" || item.Download is null) return new("idle", "Workshop import cancelled.");
+        if (action != "direct" || item.Download is null) return new("idle", "Installation cancelled.");
         var staging = Directory.CreateTempSubdirectory("sts2-workshop-").FullName;
         try
         {
@@ -1069,40 +1093,46 @@ public static class Entry
         var manifests = (await session.WorkshopManifestsAsync(item, ct)).ToList();
         if (manifests.Count == 0) return new("error", "Steam returned no accessible Workshop versions.");
         var installed = activeProfile?.PayloadId is null ? current : profileVersion;
-        var branch = previousBranch ?? (installed?.DepotId == Payload.WindowsDepot ? installed.Branch : null);
-        if (!string.IsNullOrEmpty(branch))
+        var branch = installed?.DepotId == Payload.WindowsDepot ? installed.Branch : previousBranch ?? "public";
+        var recommended = WorkshopManifest.Recommended(manifests, branch);
+        if (recommended is not null)
         {
-            var matching = WorkshopManifest.ResolveBranch(manifests, branch);
-            if (matching is not null)
-            {
-                manifests.RemoveAll(manifest => manifest.Id == matching.Id && manifest.MinimumBranch == matching.MinimumBranch &&
-                    manifest.MaximumBranch == matching.MaximumBranch);
-                manifests.Insert(0, matching);
-            }
-            else if (branch != "public" && manifests.Find(manifest => manifest.Source == "Default manifest") is { } fallback)
-            {
-                manifests.Add(fallback with { Branch = branch, Source = "Default manifest requested for installed branch" });
-            }
+            var choice = await Ask("workshop-branch", item.Title, ct,
+                [new("install", $"Install for {branch}", recommended.Source),
+                 new("versions", "Choose another version", "Review available Workshop manifests"), new("back", "Back to Workshop", "")]);
+            if (choice == "back") return new("idle", "Installation cancelled.");
+            if (choice == "install") return await InstallWorkshopVersionAsync(session, item, recommended, ct);
         }
         var choices = manifests.Select((manifest, index) => new Choice(index.ToString(CultureInfo.InvariantCulture),
             $"{manifest.Branch} · {manifest.Source}",
             manifest.MinimumBranch.Length == 0 && manifest.MaximumBranch.Length == 0 ? $"{manifest.Id}" :
-                $"{manifest.Id} · {manifest.MinimumBranch} to {manifest.MaximumBranch}")).ToArray();
+                $"{manifest.Id} · {manifest.MinimumBranch} to {manifest.MaximumBranch}")).Append(new("back", "Back to Workshop", "")).ToArray();
         var selected = await Ask("workshop-manifest", item.Title, ct, choices);
+        if (selected == "back") return new("idle", "Installation cancelled.");
         if (!int.TryParse(selected, NumberStyles.None, CultureInfo.InvariantCulture, out var selection) || selection >= manifests.Count)
             return new("error", "Choose an available Workshop version.");
+        return await InstallWorkshopVersionAsync(session, item, manifests[selection], ct);
+    }
+
+    static async Task<State> InstallWorkshopVersionAsync(SteamSession session, WorkshopItem item, WorkshopManifest version, CancellationToken ct)
+    {
         var library = ActiveMods();
-        var version = manifests[selection];
+        if (library.List().Any(mod => mod.Enabled && mod.Workshop is { } origin && origin.ItemId == item.Id &&
+            origin.Manifest == version.Id && origin.Branch.Equals(version.Branch, StringComparison.OrdinalIgnoreCase) && PackageEnabled(library, mod)))
+            return new("idle", $"{item.Title} is already installed.");
         if (!await InstallWorkshopDependenciesAsync(session, library, item, version.Branch, ct))
             return new("idle", "Workshop installation stopped before installing the selected item.");
         return await DownloadWorkshopItemAsync(session, library, item, version, ct);
     }
 
+    static bool PackageEnabled(ModLibrary library, InstalledMod mod) => mod.Modules is null || library.Modules(mod.Key).All(module => module.Enabled == true);
+
     static async Task<bool> InstallWorkshopDependenciesAsync(SteamSession session, ModLibrary library, WorkshopItem item,
         string branch, CancellationToken ct)
     {
-        var installed = library.List().Where(mod => mod.Enabled && mod.Workshop is { } origin &&
-            origin.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase)).Select(mod => mod.Workshop!.ItemId).ToHashSet();
+        var packages = library.List().Where(mod => mod.Enabled && PackageEnabled(library, mod)).ToArray();
+        var installed = packages.Where(mod => mod.Workshop is { } origin &&
+            (origin.Manifest is null || origin.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase))).Select(mod => mod.Workshop!.ItemId).ToHashSet();
         var dependencies = new Dictionary<ulong, WorkshopItem>();
         IReadOnlyList<ulong> missing;
         try
@@ -1112,6 +1142,8 @@ public static class Entry
             {
                 var details = await session.WorkshopDetailsAsync(id, token);
                 dependencies[id] = details.Item;
+                if (id != item.Id && packages.Any(package => package.Workshop is null &&
+                    package.ModuleIds.Contains(details.Item.Title.Trim(), StringComparer.OrdinalIgnoreCase))) installed.Add(id);
                 return details.Dependencies;
             }, ct);
         }
@@ -1119,13 +1151,13 @@ public static class Entry
         {
             HostDiagnostics.Error("Workshop dependencies", error);
             return await Ask("workshop-dependency-error", "Steam did not return all dependency details.", ct,
-                [new("cancel", "Return to launcher", "Review the required items in Steam"),
+                [new("cancel", "Back to Workshop", "Review the required items in Steam"),
                  new("one", "Install this item only", "Continue with the selected Workshop item")]) == "one";
         }
         if (missing.Count == 0) return true;
         var titles = string.Join(", ", missing.Select(id => dependencies[id].Title));
         var choice = await Ask("workshop-dependencies", $"{missing.Count} Workshop dependencies",
-            ct, [new("cancel", "Cancel installation", "Return to the launcher"),
+            ct, [new("cancel", "Back to Workshop", "Cancel installation"),
                  new("queue", "Install dependencies and item", titles),
                  new("one", "Install this item only", "Use any dependencies already on the iPad")]);
         if (choice != "queue") return choice == "one";
@@ -1133,9 +1165,7 @@ public static class Entry
         {
             var dependency = dependencies[id];
             var manifests = await session.WorkshopManifestsAsync(dependency, ct);
-            var target = WorkshopManifest.ResolveBranch(manifests, branch);
-            if (target is null && manifests.FirstOrDefault(manifest => manifest.Source == "Default manifest") is { } fallback)
-                target = fallback with { Branch = branch };
+            var target = WorkshopManifest.Recommended(manifests, branch);
             if (target is null) throw new InvalidDataException($"Steam did not return a manifest for Workshop dependency {id}.");
             await DownloadWorkshopItemAsync(session, library, dependency, target, ct);
             if (!library.List().Any(mod => mod.Enabled && mod.Workshop is { } origin && origin.ItemId == id &&
@@ -1258,6 +1288,11 @@ public static class Entry
                 const double MiB = 1024.0 * 1024;
                 result = new("error", $"This operation needs {Math.Ceiling(error.RequiredBytes / MiB):N0} MiB of free space. {Math.Floor(error.AvailableBytes / MiB):N0} MiB is available.");
             }
+            catch (InvalidDataException error) when (operation == "Steam Workshop")
+            {
+                HostDiagnostics.Error(operation, error);
+                result = new("error", WorkshopDataError(error));
+            }
             catch (NotSupportedException) when (operation is "Archive import" or "Mod import" or "Steam Workshop" or "Nexus Mods")
             {
                 result = new("error", "Choose a ZIP, 7z, RAR, or supported TAR archive.");
@@ -1298,6 +1333,13 @@ public static class Entry
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int SignInSteam() => Start("Steam sign-in", new("auth", "Opening Steam sign-in…"), async (_, ct) =>
+    {
+        await using var session = await OpenSteamAsync(ct);
+        return new("idle", "Signed in to Steam.");
+    }) ? 0 : -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int ForgetSession()
     {
         lock (Sync)
@@ -1333,6 +1375,7 @@ public static class Entry
         var modLibrary = new ModLibrary(paths.ModsDirectory);
         var mods = modLibrary.RuntimeDirectory();
         launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
+        launchHasEnabledMods = modLibrary.EnabledModuleIds().Count != 0;
         Publish(new("verify", "Checking game runtime compatibility…"));
         if (Launcher.Adapters.GameCompatibilityAudit.FirstIssue(plan.GameAssembly, activeProfile.IsolateSaves,
             activeProfile.IsolateMods || launchProfilePaths.ModsPaused) is { } issue)
@@ -1452,8 +1495,8 @@ public static class Entry
             HostDiagnostics.Stage("install game compatibility hooks");
             GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
-                releaseInfo ?? throw new InvalidOperationException());
-            GameCompatibility.ApplyLaunchOptions(launchOptions);
+                releaseInfo ?? throw new InvalidOperationException(), launchHasEnabledMods);
+            GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!);
             HostDiagnostics.Stage("game compatibility hooks installed");
             return 0;
         }

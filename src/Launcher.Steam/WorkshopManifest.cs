@@ -16,4 +16,11 @@ public sealed record WorkshopManifest(ulong Id, string Branch, string MinimumBra
             item.MaximumBranch.Equals(branch, StringComparison.OrdinalIgnoreCase)).OrderByDescending(item => item.Timestamp).FirstOrDefault();
         return tagged is null ? null : tagged with { Branch = branch };
     }
+
+    public static WorkshopManifest? Recommended(IReadOnlyList<WorkshopManifest> choices, string branch)
+    {
+        if (ResolveBranch(choices, branch) is { } snapshot) return snapshot;
+        var latest = choices.FirstOrDefault(item => item.Source == "Default manifest");
+        return latest is null ? null : latest with { Branch = branch };
+    }
 }

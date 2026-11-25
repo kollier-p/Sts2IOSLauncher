@@ -25,7 +25,7 @@ static InitHost initHost;
 static Command beginDownload, beginImport, beginModImport, beginSnapshotImport;
 static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
-    browseLaunchOptions, cancelOperation, prepareGame, forgetSession;
+    browseLaunchOptions, cancelOperation, prepareGame, signInSteam, forgetSession;
 static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
 static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
@@ -65,6 +65,7 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
         {"Reply", (void **)&reply},
         {"Cancel", (void **)&cancelOperation},
         {"ForgetSession", (void **)&forgetSession},
+        {"SignInSteam", (void **)&signInSteam},
         {"Prepare", (void **)&prepareGame},
         {"CopyStatus", (void **)&copyStatus},
     };
@@ -127,6 +128,7 @@ static BOOL workshopImageURL(NSURL *url) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Choice"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Choice"];
     NSDictionary *choice = self.choices[indexPath.row];
+    cell.selectionStyle=[choice[@"Value"] length]?UITableViewCellSelectionStyleDefault:UITableViewCellSelectionStyleNone;
     cell.textLabel.text = choice[@"Title"];
     cell.textLabel.numberOfLines=2;
     cell.detailTextLabel.text = choice[@"Detail"];
@@ -164,7 +166,8 @@ static BOOL workshopImageURL(NSURL *url) {
             LauncherChoices *list=weakSelf;
             [list.images setObject:image forKey:url];
             UITableViewCell *visible=[list.tableView cellForRowAtIndexPath:indexPath];
-            if(visible){
+            if(visible && indexPath.row<list.choices.count &&
+               [list.choices[indexPath.row][@"Thumbnail"] isEqual:url.absoluteString]){
                 visible.imageView.image=image;
                 [visible setNeedsLayout];
             }
@@ -172,7 +175,9 @@ static BOOL workshopImageURL(NSURL *url) {
     }] resume];
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    self.selectValue(self.choices[indexPath.row][@"Value"]);
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSString *value=self.choices[indexPath.row][@"Value"];
+    if(value.length && self.selectValue) self.selectValue(value);
 }
 - (void)cancelPressed { self.cancelSelection(); }
 @end
@@ -257,13 +262,17 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UIApplication *application;
 @property(nonatomic,strong) NSDictionary *options;
 @property(nonatomic,strong) UIWindow *window;
-@property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
+@property(nonatomic,strong) UITextField *branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile,*steamAccount;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*steamSignIn,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
+@property(nonatomic,strong) UINavigationController *workshopSheet;
+@property(nonatomic,strong) LauncherChoices *workshopList;
+@property(nonatomic,copy) NSString *workshopPageTitle;
+@property(nonatomic,assign) CGPoint workshopPageOffset;
 @property(nonatomic,strong) NSURL *scopedArchive;
 @property(nonatomic,assign) ArchivePicker archivePicker;
 @property(nonatomic,assign) int64_t shownPromptId;
@@ -348,11 +357,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profile=[UILabel new];self.profile.textColor=UIColor.secondaryLabelColor;
     self.steamAccount=[UILabel new];self.steamAccount.textColor=UIColor.secondaryLabelColor;
     self.steamAccount.numberOfLines=0;self.steamAccount.text=@"Steam: Signed out";
-    self.account=[self field:@"Steam account name" secure:NO];self.password=[self field:@"Steam password" secure:YES];
     self.branch=[self field:@"Branch: public, beta name or ? to list" secure:NO];self.branch.text=@"?";
     self.manifest=[self field:@"Exact manifest ID (optional)" secure:NO];
     self.beta=[self field:@"Private beta password (optional)" secure:YES];
     self.download=[self button:@"Install from Steam" action:@selector(downloadPressed)];
+    self.steamSignIn=[self button:@"Sign in to Steam" action:@selector(steamSignInPressed)];
     self.forget=[self button:@"Sign out of Steam" action:@selector(forgetPressed)];
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
@@ -381,16 +390,17 @@ static void forward(id service,SEL selector,UIApplication *application) {
     downloadStyle.title=@"Install from Steam";
     self.download.configuration=downloadStyle;
 
-    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods",@"Tools"]];
+    UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods",@"Steam",@"Tools"]];
     navigation.selectedSegmentIndex=0;
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
-    UIStackView *installSection=[self section:@[self.importGame,self.steamAccount,self.account,self.password,self.branch,self.manifest,self.beta,self.download,self.forget]];
+    UIStackView *installSection=[self section:@[self.importGame,self.branch,self.manifest,self.beta,self.download]];
+    UIStackView *steamSection=[self section:@[self.steamAccount,self.steamSignIn,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.importSnapshot,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus,nexusWebsite]];
     UIStackView *toolsSection=[self section:@[self.launchOptions,self.files,self.diagnostics,about]];
-    self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
-    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
+    self.sections=@[playSection,installSection,savesSection,modsSection,steamSection,toolsSection];
+    UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,steamSection,toolsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
     stack.translatesAutoresizingMaskIntoConstraints=NO;
     [self sectionChanged:navigation];
@@ -402,6 +412,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
     self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
+    self.steamSignIn.enabled=NO;
     self.timer=[NSTimer timerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
@@ -458,6 +469,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [state[@"SteamSessionTemporary"] boolValue]?@" (saved for this launch only)":@""]:@"Steam: Signed out";
     self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.forget.enabled=idle && steamAccount!=nil;
+    self.forget.hidden=steamAccount==nil;
+    self.steamSignIn.enabled=idle;
+    self.steamSignIn.hidden=steamAccount!=nil;
     self.play.enabled=idle && installed!=nil && profile!=nil;
     self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
@@ -482,6 +496,14 @@ static void forward(id service,SEL selector,UIApplication *application) {
     }
     self.shownPromptId=0;
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
+    if(self.workshopSheet){
+        if(idle){
+            [self.workshopSheet dismissViewControllerAnimated:YES completion:nil];
+            self.workshopSheet=nil;self.workshopList=nil;self.workshopPageTitle=nil;
+        }else{
+            [self updateWorkshopStatus:message];
+        }
+    }
     if([stage isEqual:@"ready"]){
         if(self.application.applicationState!=UIApplicationStateActive)return;
         [self.timer invalidate];self.message.text=@"Starting Godot…";
@@ -508,12 +530,18 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)showPrompt:(NSDictionary*)state {
     NSString *kind=state[@"Prompt"],*message=state[@"Message"];
     int64_t identifier=[state[@"PromptId"] longLongValue];
-    if(self.shownPromptId==identifier || self.presentedViewController)return;
+    UIViewController *presenter=self.workshopSheet;
+    if(!presenter) presenter=self;
+    if(self.shownPromptId==identifier || presenter.presentedViewController)return;
     self.shownPromptId=identifier;
     __weak LauncherGate *weakGate=self;
     void (^submit)(NSString *)=^(NSString *value){reply(value.UTF8String,identifier);weakGate.prompt=nil;};
     void (^cancel)(void)=^{cancelOperation();weakGate.prompt=nil;};
     if([state[@"Choices"] isKindOfClass:NSArray.class]){
+        if([kind hasPrefix:@"workshop-"] || self.workshopSheet){
+            [self showWorkshopChoices:state[@"Choices"] title:message page:[kind isEqual:@"workshop-page"] reply:submit];
+            return;
+        }
         LauncherChoices *list=[[LauncherChoices alloc] initWithStyle:UITableViewStyleInsetGrouped];
         list.title=message;
         list.choices=state[@"Choices"];
@@ -549,7 +577,49 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Submit" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(weakAlert.textFields.firstObject.text ?: @"");}]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a){cancel();}]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+- (void)updateWorkshopStatus:(NSString *)message {
+    LauncherChoices *list=self.workshopList;
+    if(list.choices.count==1 && [list.choices.firstObject[@"Title"] isEqual:message] &&
+       ![list.choices.firstObject[@"Value"] length])return;
+    list.choices=@[@{@"Title":message ?: @"Working…",@"Detail":@""}];
+    list.selectValue=nil;
+    [list.tableView reloadData];
+    [list.tableView setContentOffset:CGPointMake(0,-list.tableView.adjustedContentInset.top) animated:NO];
+}
+- (void)showWorkshopChoices:(NSArray<NSDictionary *> *)choices title:(NSString *)title page:(BOOL)page
+                       reply:(void (^)(NSString *))submit {
+    BOOL open=self.workshopSheet==nil;
+    if(open){
+        self.workshopList=[[LauncherChoices alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        self.workshopList.cancelSelection=^{cancelOperation();};
+        self.workshopSheet=[[UINavigationController alloc] initWithRootViewController:self.workshopList];
+        self.workshopSheet.modalPresentationStyle=UIModalPresentationFormSheet;
+        self.workshopSheet.modalInPresentation=YES;
+    }
+    LauncherChoices *list=self.workshopList;
+    list.title=title;
+    list.choices=choices;
+    __weak LauncherGate *weakGate=self;
+    list.selectValue=^(NSString *value){
+        LauncherGate *gate=weakGate;
+        if(page && ![value isEqual:@"next"] && ![value isEqual:@"previous"]) {
+            gate.workshopPageTitle=title;
+            gate.workshopPageOffset=gate.workshopList.tableView.contentOffset;
+        }
+        [gate updateWorkshopStatus:@"Loading Workshop…"];
+        submit(value);
+    };
+    if(open){
+        [self presentViewController:self.workshopSheet animated:YES completion:nil];
+    }else{
+        [list.tableView reloadData];
+        [list.tableView layoutIfNeeded];
+        CGPoint offset=page && [self.workshopPageTitle isEqual:title] ? self.workshopPageOffset :
+            CGPointMake(0,-list.tableView.adjustedContentInset.top);
+        [list.tableView setContentOffset:offset animated:NO];
+    }
 }
 - (void)showError:(NSString *)message {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:nil message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -669,14 +739,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [self showError:@"Unable to open the selected archive."];
     }
 }
-- (void)forgetPressed {
-    if(forgetSession()!=0){[self showError:@"Unable to clear saved Steam session."];return;}
-    self.account.text=@"";self.password.text=@"";
-}
+- (void)steamSignInPressed { if(signInSteam()!=0)[self showError:@"Unable to start Steam sign-in."]; }
+- (void)forgetPressed { if(forgetSession()!=0)[self showError:@"Unable to clear saved Steam session."]; }
 - (void)downloadPressed {
-    NSDictionary *request=@{@"Username":self.account.text?:@"",@"Password":self.password.text?:@"",@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@""};
+    NSDictionary *request=@{@"Branch":self.branch.text?:@"public",@"Manifest":self.manifest.text?:@"",@"BetaPassword":self.beta.text?:@""};
     NSData *data=[NSJSONSerialization dataWithJSONObject:request options:0 error:nil];NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
-    self.password.text=@"";self.beta.text=@"";[self.view endEditing:YES];int rc=beginDownload(json.UTF8String);
+    self.beta.text=@"";[self.view endEditing:YES];int rc=beginDownload(json.UTF8String);
     if(rc==-2)[self showError:@"Enter your Steam account name and password."];
     else if(rc==-3)[self showError:@"Enter the numeric Steam manifest ID or leave it blank."];
     else if(rc!=0)[self showError:@"Unable to start the Steam download."];

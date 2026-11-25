@@ -15,7 +15,10 @@ internal static class GameCompatibility
     static object? harmony;
     static Type? harmonyMethod;
     static MethodInfo? patch;
-    public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release)
+    static MethodInfo? modDirectoryCheck;
+    static Type? modSettingsType;
+    static bool enableLauncherMods;
+    public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release, bool hasEnabledMods)
     {
         profilePaths=paths;releaseInfo=release;
         var library=AssemblyLoadContext.Default.LoadFromAssemblyName(new AssemblyName("0Harmony"));
@@ -30,11 +33,22 @@ internal static class GameCompatibility
         Optional(game,"MegaCrit.Sts2.Core.Debug.SentryService","Initialize",typeof(void),nameof(Skip));
         Optional(game,"MegaCrit.Sts2.Core.Saves.PrefsSave","get_UploadData",typeof(bool),nameof(False));
         if (profile.IsolateSaves) PatchIsolatedSaves(game);
+        enableLauncherMods = hasEnabledMods && !paths.ModsPaused;
         var mods=game.GetType("MegaCrit.Sts2.Core.Modding.ModManager");
         var scanner=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadModsInDirRecursive"&&m.GetParameters().FirstOrDefault()?.ParameterType==typeof(string)).ToArray()??[];
         if(scanner.Length==1) Patch(scanner[0],typeof(GameCompatibility).GetMethod(nameof(ModPath),Flags)!);
         else if (profile.IsolateMods || paths.ModsPaused)
             throw new NotSupportedException("This game build does not expose a compatible mod directory scanner.");
+        var initializers = mods?.GetMethods(Flags).Where(method => method.IsStatic && method.Name == "Initialize" &&
+            method.GetParameters() is [var io, var settings, ..] && io.ParameterType.Name == "IModManagerFileIo" &&
+            settings.ParameterType.Name == "ModSettings").ToArray() ?? [];
+        foreach (var init in initializers)
+        {
+            modSettingsType = init.GetParameters()[1].ParameterType;
+            Patch(init, typeof(GameCompatibility).GetMethod(nameof(InitializeMods), Flags)!);
+        }
+        if (initializers.Length == 0 && enableLauncherMods)
+            HostDiagnostics.Stage("mod initialization hook unavailable; using the game scanner");
         var steamScan=mods?.GetMethods(Flags).Where(m=>m.Name=="ReadSteamMods").ToArray()??[];
         foreach(var method in steamScan)
         {
@@ -45,8 +59,20 @@ internal static class GameCompatibility
         if(releaseMethods.Length==1)Patch(releaseMethods[0],typeof(GameCompatibility).GetMethod(nameof(Release),Flags)!.MakeGenericMethod(releaseMethods[0].ReturnType),"postfix");
     }
 
-    public static void ApplyLaunchOptions(GameLaunchOptions options)
+    public static void ApplyLaunchOptions(GameLaunchOptions options, Assembly game)
     {
+        if (options.RenderWarmup)
+        {
+            try
+            {
+                var menu = game.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu");
+                var ready = menu?.GetMethod("_Ready", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
+                if (ready?.ReturnType == typeof(void))
+                    Patch(ready, typeof(GameRenderWarmup).GetMethod(nameof(GameRenderWarmup.MainMenuReady), Flags)!, "postfix");
+                else HostDiagnostics.Stage("render warmup unavailable for this game version");
+            }
+            catch (Exception error) { HostDiagnostics.Error("install optional render warmup", error); }
+        }
         if (options.FrameLimit is null && options.TouchAsMouse is null) return;
         var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");
         if (godot is null)
@@ -136,12 +162,54 @@ internal static class GameCompatibility
     public static bool Complete(ref Task __result){__result=Task.CompletedTask;return false;}
     public static bool Skip()=>false;
     public static bool False(ref bool __result){__result=false;return false;}
+    static bool IsModRoot(string? path) => !string.IsNullOrEmpty(path) &&
+        Path.GetFileName(path.Replace('\\', '/').TrimEnd('/')).Equals("mods", StringComparison.OrdinalIgnoreCase);
+
+    public static void InitializeMods(object[] __args)
+    {
+        try
+        {
+            var io = __args[0];
+            if (io is not null)
+            {
+                // The desktop directory existence check runs before the recursive scanner.
+                // Route both operations to the same profile directory.
+                var runtimeType = io.GetType();
+                var method = runtimeType.GetMethod("DirectoryExists", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                    binder: null, types: [typeof(string)], modifiers: null);
+                if (method?.ReturnType == typeof(bool))
+                {
+                    if (method != modDirectoryCheck)
+                    {
+                        Patch(method, typeof(GameCompatibility).GetMethod(nameof(ModDirectoryExists), Flags)!);
+                        modDirectoryCheck = method;
+                    }
+                }
+                else HostDiagnostics.Stage("game mod directory check unavailable");
+            }
+            if (enableLauncherMods && modSettingsType?.GetProperty("PlayerAgreedToModLoading") is { CanWrite: true } enabled)
+            {
+                var settings = __args[1] ?? Activator.CreateInstance(modSettingsType);
+                enabled.SetValue(settings, true);
+                __args[1] = settings!;
+                HostDiagnostics.Stage("game mod loading enabled for installed launcher mods");
+            }
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure game mod startup", error); }
+    }
+
+    public static bool ModDirectoryExists(string __0, ref bool __result)
+    {
+        if (!IsModRoot(__0)) return true;
+        __result = Directory.Exists(profilePaths!.ModsDirectory);
+        return false;
+    }
+
     public static void ModPath(ref string __0)
     {
-        if(string.IsNullOrWhiteSpace(__0))return;
-        var full=Path.GetFullPath(__0);
-        var desktop=Path.Combine(AppContext.BaseDirectory,"mods");
-        if(full==desktop||Path.GetFileName(full)=="mods")__0=profilePaths!.ModsDirectory;
+        if (!IsModRoot(__0)) return;
+        __0 = profilePaths!.ModsDirectory;
+        HostDiagnostics.Stage(profilePaths.ModsPaused ? "game scanning paused mod directory" : "game scanning launcher mod directory");
     }
     public static void Release<T>(ref T __result) where T:class
     {

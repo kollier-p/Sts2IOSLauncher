@@ -158,7 +158,8 @@ public sealed class SteamSession : IAsyncDisposable
         query.publishedfileids.Add(id);
         var result = await published.GetDetails(query).ToTask().WaitAsync(ct);
         var details = result.Result == EResult.OK ? result.Body?.publishedfiledetails.SingleOrDefault(item =>
-            item.publishedfileid == id && item.consumer_appid == Payload.AppId && item.result == (uint)EResult.OK && !item.banned) : null;
+            item.publishedfileid == id && item.consumer_appid is 0 or Payload.AppId &&
+            (item.result == 0 || item.result == (uint)EResult.OK) && !item.banned) : null;
         if (details is null) throw new IOException($"Steam returned no authorized details for Workshop item {id}.");
         var title = string.IsNullOrWhiteSpace(details.title) ? $"Workshop {id}" : details.title;
         var item = new WorkshopItem(id, title, null, null, details.hcontent_file == 0 ? null : details.hcontent_file, details.time_updated);

@@ -10,9 +10,11 @@ Launch profiles can isolate saves and mods independently and pin an installed ga
 
 The Saves section supports WebDAV upload and download over HTTPS. Enter the same remote slot on both launchers to share `SlayTheSpire2/saves/<slot>/`. Connection credentials are stored in Keychain. Optional automatic sync checks before play and can upload changes from the previous session. Strong server ETags let the launcher reuse known checksums for unchanged files. Sync preserves normal and modded save trees and backs up local data before applying a download. A conflict prompt asks which copy to keep. [Android save sync reference](https://github.com/kollier-p/Sts2MobileLauncher/blob/main/android/src/com/godot/game/webdav/WebDavSyncManager.java)
 
-The first Steam sign-in saves a refresh token for game installation, Steam Cloud and Workshop across app restarts. The launcher uses Keychain or app-private iOS Data Protection storage when the app has no Keychain entitlement. Use **Install → Sign out of Steam** to clear that login. **Steam Workshop → My subscriptions** lists the signed-in account’s subscriptions in subscription order.
+The **Steam** tab manages sign-in and sign-out. The first sign-in saves a refresh token for game installation, Steam Cloud and Workshop across app restarts. The launcher uses Keychain or app-private iOS Data Protection storage when the app has no Keychain entitlement. **Steam Workshop → My subscriptions** lists the signed-in account’s subscriptions in subscription order. Workshop returns to the same results after an installation and offers the installed game’s branch first.
 
 The same save conflict checks apply to manual Steam Cloud sync. Downloads show file and byte progress, then back up and apply the verified saves. Steam Cloud preserves normal and modded save paths.
+
+**Tools → Game launch settings → Startup render warmup** is optional. Godot draws selected card materials, UI textures, and canvas shaders in a small offscreen viewport over several frames when the main menu is ready. The installed renderer builds its own pipelines on the device. Compare cold launches on the same iPad to measure the effect.
 
 ## Native dependencies
 

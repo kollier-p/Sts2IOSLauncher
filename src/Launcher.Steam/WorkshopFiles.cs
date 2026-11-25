@@ -14,7 +14,7 @@ public enum WorkshopSort { Popular, Latest, Updated, Subscribed }
 
 public sealed class WorkshopFiles(HttpClient http)
 {
-    const int SubscriptionsPerPage = 30;
+    const int SubscriptionsPerPage = 50;
     const string Details = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
     const string Community = "https://steamcommunity.com/workshop/browse/";
 
@@ -28,8 +28,9 @@ public sealed class WorkshopFiles(HttpClient http)
     public static WorkshopPage SubscriptionPage(int page, CPublishedFile_GetUserFiles_Response response)
     {
         var pages = Math.Max(1, (int)((response.total + (long)SubscriptionsPerPage - 1) / SubscriptionsPerPage));
-        var items = response.publishedfiledetails.Where(item => (!item.ShouldSerializeresult() || item.result == (uint)EResult.OK) &&
-            item.publishedfileid != 0 && item.consumer_appid == Payload.AppId && !item.banned)
+        if (!response.ShouldSerializetotal() && response.publishedfiledetails.Count == SubscriptionsPerPage) pages = page + 1;
+        var items = response.publishedfiledetails.Where(item => (item.result == 0 || item.result == (uint)EResult.OK) &&
+            item.publishedfileid != 0 && item.consumer_appid is 0 or Payload.AppId && !item.banned)
             .DistinctBy(item => item.publishedfileid).Select(item => new WorkshopListing(item.publishedfileid,
                 string.IsNullOrWhiteSpace(item.title) ? $"Workshop {item.publishedfileid}" : item.title,
                 Summary(item.short_description), PublicTransferUri(item.preview_url))).ToArray();

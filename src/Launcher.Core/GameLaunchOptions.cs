@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace Launcher.Core;
 
-public sealed record GameLaunchOptions(int? FrameLimit = null, bool? TouchAsMouse = null);
+public sealed record GameLaunchOptions(int? FrameLimit = null, bool? TouchAsMouse = null, bool RenderWarmup = false);
 
 public sealed class GameLaunchOptionsStore(string path)
 {

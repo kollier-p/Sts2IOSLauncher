@@ -108,19 +108,25 @@ public sealed class ModLibrary(string activeDirectory)
             var files = Directory.GetFiles(stage, "*", SearchOption.AllDirectories);
             if (files.Any(file => Path.GetFileName(file).Equals(ReceiptFile, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidDataException("Reserved mod package file.");
-            if (files.Length == 1 && ArchiveFormats.Detect(files[0]) is { } format)
+            var modules = PrepareModules(stage, ct, allowEmpty: true);
+            if (modules.Length == 0)
             {
+                var archives = files.Select(file => (File: file, Format: ArchiveFormats.Detect(file)))
+                    .Where(candidate => candidate.Format.HasValue).Take(2).ToArray();
+                if (archives is not [var archive])
+                    throw new InvalidDataException(archives.Length == 0 ? "No mod manifest with a neighboring managed DLL or resource pack was found." :
+                        "The download contains multiple archives. Import the intended archive separately.");
                 var nested = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N") + ".archive");
-                File.Move(files[0], nested);
+                File.Move(archive.File, nested);
                 try
                 {
                     Directory.Delete(stage, recursive: true);
                     Directory.CreateDirectory(stage);
-                    await ExtractAsync(nested, format, stage, ct);
+                    await ExtractAsync(nested, archive.Format!.Value, stage, ct);
                 }
                 finally { File.Delete(nested); }
+                modules = PrepareModules(stage, ct);
             }
-            var modules = PrepareModules(stage, ct);
             var label = new string(displayName.Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
             return new PreparedImport(stage, label.Length == 0 ? modules[0].Id : label, modules, workshop);
         }
@@ -441,6 +447,8 @@ public sealed class ModLibrary(string activeDirectory)
         var workshop = import.Workshop is { } origin ? installed.SingleOrDefault(mod => mod.Workshop is { } old &&
             old.ItemId == origin.ItemId && old.Branch.Equals(origin.Branch, StringComparison.OrdinalIgnoreCase)) : null;
         var matches = installed.Where(mod => mod.ModuleIds.Any(incoming.Contains)).ToArray();
+        if (workshop is null && import.Workshop is { } incomingOrigin && matches is [var overlap] &&
+            overlap.Workshop?.ItemId == incomingOrigin.ItemId) workshop = overlap;
         if (workshop is not null)
         {
             if (matches.Any(mod => mod.Key != workshop.Key))
@@ -550,7 +558,7 @@ public sealed class ModLibrary(string activeDirectory)
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    static ModModule[] PrepareModules(string stage, CancellationToken ct, bool normalize = true)
+    static ModModule[] PrepareModules(string stage, CancellationToken ct, bool normalize = true, bool allowEmpty = false)
     {
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var modules = new List<ModModule>();
@@ -605,7 +613,7 @@ public sealed class ModLibrary(string activeDirectory)
             modules.Add(new(id, relative, Metadata(json, "version"), Metadata(json, "author"),
                 Dependencies(json), Metadata(json, "min_game_version", "minGameVersion")));
         }
-        if (ids.Count == 0) throw new InvalidDataException("The package has no mod manifests with a managed DLL or resource pack.");
+        if (!allowEmpty && ids.Count == 0) throw new InvalidDataException("The package has no mod manifests with a managed DLL or resource pack.");
         return modules.OrderBy(module => module.Id, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 

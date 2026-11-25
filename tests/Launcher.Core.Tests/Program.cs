@@ -400,6 +400,13 @@ try
     }
     using var firstMod = mods.PrepareArchiveAsync(CreateModZip("First mod", "TestMod", "old"), CancellationToken.None).GetAwaiter().GetResult();
     var installedMod = mods.Install(firstMod, replace: false, CancellationToken.None);
+    using (var wrapped = mods.PrepareDownloadAsync("Workshop download", (stage, _) =>
+    {
+        File.Copy(CreateModZip("Workshop package", "WrappedMod", "fixture"), Path.Combine(stage, "payload.zip"));
+        File.WriteAllText(Path.Combine(stage, "description.txt"), "Steam Workshop metadata");
+        return Task.CompletedTask;
+    }, CancellationToken.None).GetAwaiter().GetResult())
+        Assert(wrapped.ModuleIds.SequenceEqual(new[] { "WrappedMod" }), "Workshop downloads can wrap a mod archive alongside metadata");
     Assert(File.Exists(Path.Combine(modsRoot, installedMod.Key, "module", "TestMod.json")), "Legacy mod manifests get their expected filename");
     File.WriteAllText(Path.Combine(modsRoot, installedMod.Key, ".sts2-mod-install"),
         System.Text.Json.JsonSerializer.Serialize(installedMod with { Modules = null }));
