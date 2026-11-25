@@ -97,9 +97,9 @@ internal static class GameCompatibility
                 var ready = menu?.GetMethod("_Ready", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
                 if (ready?.ReturnType == typeof(void))
                     Patch(ready, typeof(GameRenderWarmup).GetMethod(nameof(GameRenderWarmup.MainMenuReady), Flags)!, "postfix");
-                else HostDiagnostics.Stage("render warmup unavailable for this game version");
+                else HostDiagnostics.Stage("startup preload unavailable for this game version");
             }
-            catch (Exception error) { HostDiagnostics.Error("install optional render warmup", error); }
+            catch (Exception error) { HostDiagnostics.Error("install startup preload", error); }
         }
         if (options.FrameLimit is null && options.TouchAsMouse is null) return;
         var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");

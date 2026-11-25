@@ -227,10 +227,13 @@ try
     var profileSettings = Path.Combine(root, "profiles.json");
     var optionSettings = Path.Combine(root, "launch-options.json");
     var options = new GameLaunchOptionsStore(optionSettings);
-    Assert(options.Load() == new GameLaunchOptions(), "Launch settings default to the installed game");
-    var overrides = new GameLaunchOptions(120, false);
+    Assert(options.Load() is { FrameLimit: null, TouchAsMouse: null, RenderWarmup: true },
+        "Startup preload defaults to on while frame rate and touch follow the game");
+    File.WriteAllText(optionSettings, """{"FrameLimit":60}""");
+    Assert(options.Load() is { FrameLimit: 60, RenderWarmup: true }, "Older settings inherit the preload default");
+    var overrides = new GameLaunchOptions(120, false, RenderWarmup: false);
     options.Save(overrides);
-    Assert(new GameLaunchOptionsStore(optionSettings).Load() == overrides, "Frame and touch settings survive a restart");
+    Assert(new GameLaunchOptionsStore(optionSettings).Load() == overrides, "Launch settings and preload opt-out survive a restart");
     Reject(() => options.Save(new GameLaunchOptions(800)));
     Assert(options.Load() == overrides, "Invalid launch options preserve the saved configuration");
     var profileData = Directory.CreateDirectory(Path.Combine(root, "documents")).FullName;

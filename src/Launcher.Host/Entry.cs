@@ -468,8 +468,8 @@ public static class Entry
                     { null => "Game setting", 0 => "Uncapped", int fps => $"{fps} FPS" }),
                  new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
                     { null => "Game setting", true => "On", false => "Off" }),
-                 new("warmup", "Startup render warmup", currentOptions.RenderWarmup ? "On" : "Off"),
-                 new("reset", "Restore game defaults", "Use the installed game's options")]);
+                 new("warmup", "Startup asset preload", currentOptions.RenderWarmup ? "On" : "Off"),
+                 new("reset", "Restore defaults", "Restore default launch settings")]);
             if (action == "fps")
             {
                 var value = await Ask("launch-fps", "Frame rate limit", ct,
@@ -489,8 +489,8 @@ public static class Entry
             }
             else if (action == "warmup")
             {
-                var value = await Ask("launch-warmup", "Startup render warmup", ct,
-                    [new("on", "On", "Warm selected card materials and UI textures after the renderer starts"),
+                var value = await Ask("launch-warmup", "Startup asset preload", ct,
+                    [new("on", "On", "Prepare card textures, shaders and common combat effects before the menu"),
                      new("off", "Off", "Use normal game startup")]);
                 currentOptions = currentOptions with { RenderWarmup = value == "on" };
             }
@@ -1555,6 +1555,7 @@ public static class Entry
             GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException(), launchHasEnabledMods);
+            GameRenderWarmup.CatalogDirectory = adapterRoot;
             GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!);
             HostDiagnostics.Stage("game compatibility hooks installed");
             return 0;

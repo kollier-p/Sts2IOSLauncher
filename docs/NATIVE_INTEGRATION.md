@@ -14,7 +14,7 @@ The **Steam** tab manages sign-in and sign-out. The first sign-in saves a refres
 
 The same save conflict checks apply to manual Steam Cloud sync. Downloads show file and byte progress, then back up and apply the verified saves. Steam Cloud preserves normal and modded save paths.
 
-**Tools → Game launch settings → Startup render warmup** is optional. Godot draws selected card materials, UI textures, and canvas shaders in a small offscreen viewport over several frames when the main menu is ready. The installed renderer builds its own pipelines on the device. Compare cold launches on the same iPad to measure the effect.
+**Tools → Game launch settings → Startup asset preload** defaults to on. A loading screen shows progress before the main menu accepts input. Godot draws selected card materials, UI textures, and canvas shaders offscreen and loads common combat effect scenes and their dependencies. The effects run when instantiated during play. The first launch of each installation discovers available resources and saves a catalog. Later launches reuse that catalog, then load and render the assets again. The launcher log records the resource count, offscreen draw count, and duration of each pass. Godot manages its own renderer caches. Measure any change in combat hitching on the target iPad.
 
 ## Native dependencies
 
