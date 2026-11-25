@@ -466,8 +466,21 @@ try
         Assert(mods.Replacement(updatedWorkshop)?.Key == initial.Key, "An update can replace the same Workshop item and branch when its modules change");
         var updated = mods.Install(updatedWorkshop, true, CancellationToken.None);
         Assert(updated.Key == initial.Key && mods.List().Single().Workshop?.Manifest == 200, "Workshop origin survives in the installed mod receipt");
+        Assert(mods.WorkshopInstallations()[851] == "Installed", "Workshop badges use the active profile receipt");
+        mods.SetModuleEnabled(updated.Key, "NewWorkshopMod", false);
+        Assert(mods.WorkshopInstallations()[851] == "Installed · Disabled", "A package with all modules disabled is still installed");
+        mods.SetModuleEnabled(updated.Key, "NewWorkshopMod", true);
+        mods.SetLoadingPaused(true);
+        Assert(mods.WorkshopInstallations()[851] == "Installed · Paused", "The profile pause is shown on installed items");
+        mods.SetLoadingPaused(false);
         mods.Remove(updated.Key);
     }
+    var copiedWorkshop = Directory.CreateDirectory(Path.Combine(modsRoot, "3747561525")).FullName;
+    ZipFile.ExtractToDirectory(workshopZip, copiedWorkshop);
+    Directory.CreateDirectory(Path.Combine(modsRoot, "42"));
+    Assert(mods.WorkshopInstallations().Keys.SequenceEqual(new[] { 3747561525UL }),
+        "A valid copied Workshop folder is recognized by ID while empty numeric folders are ignored");
+    Directory.Delete(copiedWorkshop, recursive: true);
     using var nexusHandler = new NexusFixture();
     using var nexusHttp = new HttpClient(nexusHandler);
     var nexus = new NexusMods(nexusHttp, "fixture");

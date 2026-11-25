@@ -32,6 +32,7 @@ internal static class GameCompatibility
         Optional(game,"MegaCrit.Sts2.Core.Debug.OsDebugInfo","LogSystemInfo",typeof(Task),nameof(Complete));
         Optional(game,"MegaCrit.Sts2.Core.Debug.SentryService","Initialize",typeof(void),nameof(Skip));
         Optional(game,"MegaCrit.Sts2.Core.Saves.PrefsSave","get_UploadData",typeof(bool),nameof(False));
+        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(game);
         if (profile.IsolateSaves) PatchIsolatedSaves(game);
         enableLauncherMods = hasEnabledMods && !paths.ModsPaused;
         var mods=game.GetType("MegaCrit.Sts2.Core.Modding.ModManager");
@@ -57,6 +58,33 @@ internal static class GameCompatibility
         }
         var releaseMethods=game.GetType("MegaCrit.Sts2.Core.Debug.ReleaseInfoManager")?.GetMethods(Flags).Where(m=>m.Name=="LoadConfig"&&m.ReturnType.IsClass).ToArray()??[];
         if(releaseMethods.Length==1)Patch(releaseMethods[0],typeof(GameCompatibility).GetMethod(nameof(Release),Flags)!.MakeGenericMethod(releaseMethods[0].ReturnType),"postfix");
+    }
+
+    static void PatchUnsupportedMouseCalls(Assembly game)
+    {
+        try
+        {
+            var type = game.GetType("MegaCrit.Sts2.Core.Nodes.NGame");
+            while (type is not null && type.FullName != "Godot.Node") type = type.BaseType;
+            if (type is null) return;
+            var godot = type.Assembly;
+            var features = godot.GetType("Godot.DisplayServer+Feature", throwOnError: true)!;
+            var hasFeature = godot.GetType("Godot.DisplayServer", throwOnError: true)!.GetMethod("HasFeature", [features])!;
+            var input = godot.GetType("Godot.Input", throwOnError: true)!;
+            var skip = typeof(GameCompatibility).GetMethod(nameof(Skip), Flags)!;
+            foreach (var (feature, method, parameterCount) in new[]
+            {
+                ("Mouse", "SetMouseMode", 1), ("CursorShape", "SetCustomMouseCursor", 3)
+            })
+            {
+                if (hasFeature.Invoke(null, [Enum.Parse(features, feature)]) is not false) continue;
+                var target = input.GetMethods(Flags).SingleOrDefault(candidate => candidate.IsStatic &&
+                    candidate.Name == method && candidate.ReturnType == typeof(void) && candidate.GetParameters().Length == parameterCount);
+                if (target is null && method == "SetMouseMode") target = input.GetProperty("MouseMode", Flags)?.SetMethod;
+                if (target is not null) Patch(target, skip);
+            }
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure iOS pointer compatibility", error); }
     }
 
     public static void ApplyLaunchOptions(GameLaunchOptions options, Assembly game)

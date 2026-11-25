@@ -92,6 +92,8 @@ static void recordStartupFailure(NSString *documents, NSString *failure) {
 
 @interface LauncherChoices : UITableViewController<NSURLSessionTaskDelegate>
 @property(nonatomic,copy) NSArray<NSDictionary *> *choices;
+@property(nonatomic,copy) NSString *selectedValue;
+@property(nonatomic,assign) BOOL embedded;
 @property(nonatomic,copy) void (^selectValue)(NSString *value);
 @property(nonatomic,copy) void (^cancelSelection)(void);
 @property(nonatomic,strong) NSURLSession *imageSession;
@@ -103,8 +105,9 @@ static void recordStartupFailure(NSString *documents, NSString *failure) {
     [super viewDidLoad];
     self.tableView.rowHeight=UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight=56;
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
-        target:self action:@selector(cancelPressed)];
+    if(!self.embedded)
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+            target:self action:@selector(cancelPressed)];
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
@@ -133,6 +136,21 @@ static BOOL workshopImageURL(NSURL *url) {
     cell.textLabel.numberOfLines=2;
     cell.detailTextLabel.text = choice[@"Detail"];
     cell.detailTextLabel.numberOfLines=0;
+    cell.accessoryType=[self.selectedValue isEqual:choice[@"Value"]]?UITableViewCellAccessoryCheckmark:UITableViewCellAccessoryNone;
+    NSString *badge=[choice[@"Badge"] isKindOfClass:NSString.class]?choice[@"Badge"]:nil;
+    cell.accessoryView=nil;
+    if(badge.length){
+        UIButtonConfiguration *style=UIButtonConfiguration.tintedButtonConfiguration;
+        style.title=badge;
+        style.buttonSize=UIButtonConfigurationSizeMini;
+        style.baseForegroundColor=[badge isEqualToString:@"Installed"]?UIColor.systemGreenColor:UIColor.secondaryLabelColor;
+        UIButton *pill=[UIButton buttonWithConfiguration:style primaryAction:nil];
+        pill.userInteractionEnabled=NO;
+        pill.isAccessibilityElement=NO;
+        [pill sizeToFit];
+        cell.accessoryView=pill;
+    }
+    cell.accessibilityLabel=badge.length?[NSString stringWithFormat:@"%@, %@, %@",choice[@"Title"],badge,choice[@"Detail"] ?: @""]:nil;
     cell.imageView.image=nil;
     NSString *thumb=[choice[@"Thumbnail"] isKindOfClass:NSString.class]?choice[@"Thumbnail"]:nil;
     NSURL *imageURL=thumb?[NSURL URLWithString:thumb]:nil;
@@ -181,6 +199,8 @@ static BOOL workshopImageURL(NSURL *url) {
 }
 - (void)cancelPressed { self.cancelSelection(); }
 @end
+
+#include "LauncherWorkshop.mm"
 
 @interface LauncherDiagnostics : UIViewController
 @property(nonatomic,copy) NSURL *directory;
@@ -269,10 +289,9 @@ __attribute__((visibility("default")))
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
-@property(nonatomic,strong) UINavigationController *workshopSheet;
-@property(nonatomic,strong) LauncherChoices *workshopList;
-@property(nonatomic,copy) NSString *workshopPageTitle;
-@property(nonatomic,assign) CGPoint workshopPageOffset;
+@property(nonatomic,strong) UIScrollView *launcherScroll;
+@property(nonatomic,strong) LauncherWorkshop *workshopPane;
+@property(nonatomic,assign) BOOL leavingWorkshop;
 @property(nonatomic,strong) NSURL *scopedArchive;
 @property(nonatomic,assign) ArchivePicker archivePicker;
 @property(nonatomic,assign) int64_t shownPromptId;
@@ -404,7 +423,8 @@ static void forward(id service,SEL selector,UIApplication *application) {
     stack.spacing=16;
     stack.translatesAutoresizingMaskIntoConstraints=NO;
     [self sectionChanged:navigation];
-    UIScrollView *scroll=[UIScrollView new];scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
+    UIScrollView *scroll=[UIScrollView new];self.launcherScroll=scroll;
+    scroll.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:scroll];[scroll addSubview:stack];
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     NSLayoutConstraint *preferredWidth=[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-48];
     preferredWidth.priority=UILayoutPriorityDefaultHigh;
@@ -490,20 +510,17 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];
     self.message.text=message;
+    if(self.leavingWorkshop){
+        if(!idle)return;
+        self.leavingWorkshop=NO;
+    }
     if([stage isEqual:@"prompt"]){
         if(self.application.applicationState==UIApplicationStateActive)[self showPrompt:state];
         return;
     }
     self.shownPromptId=0;
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
-    if(self.workshopSheet){
-        if(idle){
-            [self.workshopSheet dismissViewControllerAnimated:YES completion:nil];
-            self.workshopSheet=nil;self.workshopList=nil;self.workshopPageTitle=nil;
-        }else{
-            [self updateWorkshopStatus:message];
-        }
-    }
+    if(self.workshopPane)[self.workshopPane showStatus:message progress:total>0?done/total:-1 busy:!idle];
     if([stage isEqual:@"ready"]){
         if(self.application.applicationState!=UIApplicationStateActive)return;
         [self.timer invalidate];self.message.text=@"Starting Godot…";
@@ -530,18 +547,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)showPrompt:(NSDictionary*)state {
     NSString *kind=state[@"Prompt"],*message=state[@"Message"];
     int64_t identifier=[state[@"PromptId"] longLongValue];
-    UIViewController *presenter=self.workshopSheet;
-    if(!presenter) presenter=self;
-    if(self.shownPromptId==identifier || presenter.presentedViewController)return;
+    if(self.shownPromptId==identifier || self.presentedViewController)return;
     self.shownPromptId=identifier;
     __weak LauncherGate *weakGate=self;
     void (^submit)(NSString *)=^(NSString *value){reply(value.UTF8String,identifier);weakGate.prompt=nil;};
     void (^cancel)(void)=^{cancelOperation();weakGate.prompt=nil;};
+    if(self.workshopPane){
+        [self.workshopPane showPrompt:state reply:submit];
+        return;
+    }
     if([state[@"Choices"] isKindOfClass:NSArray.class]){
-        if([kind hasPrefix:@"workshop-"] || self.workshopSheet){
-            [self showWorkshopChoices:state[@"Choices"] title:message page:[kind isEqual:@"workshop-page"] reply:submit];
-            return;
-        }
         LauncherChoices *list=[[LauncherChoices alloc] initWithStyle:UITableViewStyleInsetGrouped];
         list.title=message;
         list.choices=state[@"Choices"];
@@ -577,49 +592,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Submit" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){submit(weakAlert.textFields.firstObject.text ?: @"");}]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a){cancel();}]];
-    [presenter presentViewController:alert animated:YES completion:nil];
-}
-- (void)updateWorkshopStatus:(NSString *)message {
-    LauncherChoices *list=self.workshopList;
-    if(list.choices.count==1 && [list.choices.firstObject[@"Title"] isEqual:message] &&
-       ![list.choices.firstObject[@"Value"] length])return;
-    list.choices=@[@{@"Title":message ?: @"Working…",@"Detail":@""}];
-    list.selectValue=nil;
-    [list.tableView reloadData];
-    [list.tableView setContentOffset:CGPointMake(0,-list.tableView.adjustedContentInset.top) animated:NO];
-}
-- (void)showWorkshopChoices:(NSArray<NSDictionary *> *)choices title:(NSString *)title page:(BOOL)page
-                       reply:(void (^)(NSString *))submit {
-    BOOL open=self.workshopSheet==nil;
-    if(open){
-        self.workshopList=[[LauncherChoices alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        self.workshopList.cancelSelection=^{cancelOperation();};
-        self.workshopSheet=[[UINavigationController alloc] initWithRootViewController:self.workshopList];
-        self.workshopSheet.modalPresentationStyle=UIModalPresentationFormSheet;
-        self.workshopSheet.modalInPresentation=YES;
-    }
-    LauncherChoices *list=self.workshopList;
-    list.title=title;
-    list.choices=choices;
-    __weak LauncherGate *weakGate=self;
-    list.selectValue=^(NSString *value){
-        LauncherGate *gate=weakGate;
-        if(page && ![value isEqual:@"next"] && ![value isEqual:@"previous"]) {
-            gate.workshopPageTitle=title;
-            gate.workshopPageOffset=gate.workshopList.tableView.contentOffset;
-        }
-        [gate updateWorkshopStatus:@"Loading Workshop…"];
-        submit(value);
-    };
-    if(open){
-        [self presentViewController:self.workshopSheet animated:YES completion:nil];
-    }else{
-        [list.tableView reloadData];
-        [list.tableView layoutIfNeeded];
-        CGPoint offset=page && [self.workshopPageTitle isEqual:title] ? self.workshopPageOffset :
-            CGPointMake(0,-list.tableView.adjustedContentInset.top);
-        [list.tableView setContentOffset:offset animated:NO];
-    }
+    [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)showError:(NSString *)message {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:nil message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -632,7 +605,38 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)webDavPressed { [self.view endEditing:YES];if(browseWebDav()!=0)[self showError:@"Another operation is active."]; }
 - (void)steamCloudPressed { [self.view endEditing:YES];if(browseSteamCloud()!=0)[self showError:@"Another operation is active."]; }
 - (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
-- (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
+- (void)workshopPressed {
+    [self.view endEditing:YES];
+    if(browseWorkshop()!=0){[self showError:@"Another operation is active."];return;}
+    LauncherWorkshop *pane=[LauncherWorkshop new];
+    __weak LauncherGate *weakGate=self;
+    pane.close=^{[weakGate closeWorkshop];};
+    self.workshopPane=pane;
+    self.launcherScroll.hidden=YES;
+    [self addChildViewController:pane];
+    pane.view.translatesAutoresizingMaskIntoConstraints=NO;
+    [self.view addSubview:pane.view];
+    [NSLayoutConstraint activateConstraints:@[
+        [pane.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [pane.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [pane.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [pane.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
+    ]];
+    [pane didMoveToParentViewController:self];
+    [pane showStatus:@"Opening Steam Workshop…" progress:-1 busy:YES];
+}
+- (void)closeWorkshop {
+    LauncherWorkshop *pane=self.workshopPane;
+    if(!pane)return;
+    self.leavingWorkshop=YES;
+    cancelOperation();
+    [pane.view endEditing:YES];
+    [pane willMoveToParentViewController:nil];
+    [pane.view removeFromSuperview];
+    [pane removeFromParentViewController];
+    self.workshopPane=nil;
+    self.launcherScroll.hidden=NO;
+}
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
 - (void)nexusWebsitePressed {
     NSURL *url=[NSURL URLWithString:@"https://www.nexusmods.com/slaythespire2/mods/"];

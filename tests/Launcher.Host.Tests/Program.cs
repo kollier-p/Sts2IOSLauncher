@@ -71,6 +71,45 @@ unsafe
         using var data = JsonDocument.Parse(status[..^1].ToArray());
         Check(data.RootElement.GetProperty("Stage").GetString() == "idle", "Native status reports the launcher's idle state");
         Check(data.RootElement.GetProperty("Profile").GetString() == "Default", "Native status shows the active launch profile");
+
+        JsonElement WaitFor(string key, string expected)
+        {
+            var bytes = new byte[8192];
+            for (var attempt = 0; attempt < 200; attempt++)
+            {
+                fixed (byte* buffer = bytes)
+                {
+                    var length = copyStatus((nint)buffer, bytes.Length);
+                    if (length > 0)
+                    {
+                        using var current = JsonDocument.Parse(bytes.AsMemory(0, length));
+                        if (current.RootElement.GetProperty(key).GetString() == expected) return current.RootElement.Clone();
+                    }
+                }
+                Thread.Sleep(10);
+            }
+            throw new InvalidOperationException($"Expected launcher state {key}={expected}.");
+        }
+        void Choose(JsonElement prompt, string value)
+        {
+            var input = Marshal.StringToCoTaskMemUTF8(value);
+            try { Check(reply(input, prompt.GetProperty("PromptId").GetInt64()) == 0, "Workshop accepts the current prompt reply"); }
+            finally { Marshal.FreeCoTaskMem(input); }
+        }
+        Check(workshop() == 0, "Workshop opens through the native bridge");
+        var range = WaitFor("Prompt", "workshop-range");
+        Check(range.GetProperty("WorkshopSections").GetArrayLength() == 8 &&
+            range.GetProperty("WorkshopSection").GetString() == "popular", "Workshop publishes its sidebar alongside the current prompt");
+        Choose(range, "workshop-section:item");
+        var item = WaitFor("Prompt", "workshop-id");
+        Check(item.GetProperty("WorkshopSection").GetString() == "item", "The sidebar switches the in-place content");
+        Choose(item, "invalid-fixture-id");
+        var empty = WaitFor("Prompt", "workshop-home");
+        Choose(empty, "workshop-section:search");
+        WaitFor("Prompt", "workshop-query");
+        Check(cancel() == 0, "Closing Workshop cancels its prompt");
+        Check(WaitFor("Stage", "idle").GetProperty("WorkshopSection").ValueKind == JsonValueKind.Null,
+            "A closed Workshop clears its navigation state");
     }
     finally
     {

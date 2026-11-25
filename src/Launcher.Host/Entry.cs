@@ -33,10 +33,11 @@ public static class Entry
     static volatile SavedSteamLogin? steamLogin;
 
     sealed record SavedSteamLogin(SteamIdentity Identity, bool Persistent);
-    sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null);
+    sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null, string? Badge = null);
     sealed record State(string Stage, string Message, long Completed = 0, long Total = 0, double Speed = 0,
         string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0,
-        string? Installed = null, string? Profile = null, string? SteamAccount = null, bool SteamSessionTemporary = false);
+        string? Installed = null, string? Profile = null, string? SteamAccount = null, bool SteamSessionTemporary = false,
+        string? WorkshopSection = null, Choice[]? WorkshopSections = null);
     sealed record Request(string? Username, string? Password, string Branch, string? Manifest, string? BetaPassword);
 
     static void Publish(State next)
@@ -125,7 +126,9 @@ public static class Entry
             Installed = (activeProfile?.PayloadId is null ? current : profileVersion)?.DisplayName(),
             Profile = activeProfile?.Name,
             SteamAccount = login?.Identity.AccountName,
-            SteamSessionTemporary = login is { Persistent: false }
+            SteamSessionTemporary = login is { Persistent: false },
+            WorkshopSection = workshopSection,
+            WorkshopSections = workshopSection is null ? null : WorkshopSections
         });
         if (buffer == 0 || capacity <= json.Length) return -json.Length - 1;
         Marshal.Copy(json, 0, buffer, json.Length);
@@ -945,19 +948,54 @@ public static class Entry
     public static int BrowseWorkshop() => Start("Steam Workshop", new("mods", "Opening Steam Workshop…"),
         BrowseWorkshopAsync) ? 0 : -1;
 
-    static async Task<State> BrowseWorkshopAsync(PayloadStore _, CancellationToken ct)
-    {
-        var action = await Ask("workshop-home", "Steam Workshop", ct,
-            [new("popular", "Popular", "Choose a time range"),
+    static string? workshopSection;
+    static readonly Choice[] WorkshopSections =
+            [new("popular", "Popular", ""),
              new("latest", "New releases", "Browse recently published items"),
              new("updated", "Recent updates", "Browse recently updated items"),
-             new("subscribed", "Most subscribed", "Browse by subscriptions"),
+             new("subscribed", "Most subscribed", "Public ranking by subscriber count"),
              new("mine", "My subscriptions", "Browse the mods you subscribe to on Steam"),
              new("search", "Search Workshop", "Enter a title, item ID, or link"),
              new("item", "Open item", "Enter an item ID or Steam Community link"),
-             new("updates", "Installed Workshop items", "Check this profile for updates")]);
+             new("updates", "Installed items", "Check this profile for updates")];
+    sealed class WorkshopSectionChanged(string section) : Exception
+    {
+        public string Section { get; } = section;
+    }
+
+    static async Task<State> BrowseWorkshopAsync(PayloadStore _, CancellationToken ct)
+    {
         using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
         var workshop = new WorkshopFiles(http);
+        var action = "popular";
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                lock (Sync) workshopSection = action;
+                try
+                {
+                    State result;
+                    try { result = await BrowseWorkshopSectionAsync(workshop, action, ct); }
+                    catch (Exception error) when (error is InvalidDataException or IOException or HttpRequestException or
+                        TimeoutException or UnauthorizedAccessException or NotSupportedException or BadImageFormatException or JsonException)
+                    {
+                        HostDiagnostics.Error($"Workshop {action}", error);
+                        var detail = error is InvalidDataException ? WorkshopDataError(error) : "Steam could not complete this Workshop request. Try again.";
+                        if (error is InvalidDataException) HostDiagnostics.Stage($"Workshop validation: {detail}");
+                        result = new("error", detail);
+                    }
+                    await Ask("workshop-home", result.Message, ct, WorkshopSections);
+                }
+                catch (WorkshopSectionChanged change) { action = change.Section; }
+            }
+        }
+        finally { lock (Sync) workshopSection = null; }
+    }
+
+    static async Task<State> BrowseWorkshopSectionAsync(WorkshopFiles workshop, string action, CancellationToken ct)
+    {
         if (action == "mine")
         {
             await using var session = await OpenSteamAsync(ct);
@@ -1015,8 +1053,9 @@ public static class Entry
             if (feedback is not null) choices.Add(new("", feedback, ""));
             if (results.Index > 1) choices.Add(new("previous", "Previous page", ""));
             if (results.Index < results.Pages) choices.Add(new("next", "Next page", ""));
+            var installed = ActiveMods().WorkshopInstallations();
             choices.AddRange(results.Items.Select(item => new Choice(item.Id.ToString(CultureInfo.InvariantCulture), item.Title, item.Summary,
-                item.Thumbnail?.AbsoluteUri)));
+                item.Thumbnail?.AbsoluteUri, installed.GetValueOrDefault(item.Id))));
             if (choices.Count == 0) return new("idle", session is null ? "Steam Workshop returned no matching items." :
                 "You have no available Workshop subscriptions for Slay the Spire 2.");
             var selection = await Ask("workshop-page", $"{title} · Page {results.Index} of {Math.Max(1, results.Pages)}", ct, choices.ToArray());
@@ -1049,28 +1088,35 @@ public static class Entry
 
     static async Task<State> BrowseWorkshopUpdatesAsync(WorkshopFiles workshop, CancellationToken ct)
     {
-        var installed = ActiveMods().List().Where(item => item.Workshop is not null).ToArray();
-        if (installed.Length == 0) return new("idle", "Install a Workshop item to track updates.");
+        var library = ActiveMods();
+        var installed = library.WorkshopInstallations();
+        if (installed.Count == 0) return new("idle", "There are no Workshop items in this profile.");
+        var receipts = library.List().Where(item => item.Workshop is not null).GroupBy(item => item.Workshop!.ItemId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.Enabled).First());
         Publish(new("mods", "Checking installed Workshop items…"));
-        var remote = await workshop.LookupAsync(installed.Select(item => item.Workshop!.ItemId), ct);
-        var choices = installed.Select(mod =>
+        var remote = await workshop.LookupAsync(installed.Keys, ct);
+        var choices = installed.Select(entry =>
         {
-            var origin = mod.Workshop!;
-            var status = !remote.TryGetValue(origin.ItemId, out var entry) ? "Unavailable" :
-                entry.Updated > origin.Updated ? "Listing updated" : "Listing unchanged";
-            return new Choice(mod.Key, mod.Label, $"{origin.Branch} · {status}");
+            var id = entry.Key;
+            receipts.TryGetValue(id, out var package);
+            remote.TryGetValue(id, out var listing);
+            var detail = listing is null ? "Listing unavailable" : package?.Workshop is not { } origin ? "Local Workshop folder" :
+                $"{origin.Branch} · {(listing.Updated > origin.Updated ? "Listing updated" : "Listing unchanged")}";
+            return new Choice(id.ToString(CultureInfo.InvariantCulture),
+                package?.DisplayLabel ?? listing?.Title ?? $"Workshop {id}", detail, Badge: entry.Value);
         }).ToArray();
         var selected = await Ask("workshop-updates", "Installed Workshop items", ct, choices);
-        var currentWorkshop = installed.SingleOrDefault(item => item.Key == selected)?.Workshop;
-        if (currentWorkshop is null || !remote.TryGetValue(currentWorkshop.ItemId, out var item))
+        if (WorkshopFiles.ParseId(selected) is not ulong selectedId || !remote.TryGetValue(selectedId, out var item))
             return new("idle", "This Workshop item is unavailable.");
-        return await InstallWorkshopItemAsync(workshop, item, currentWorkshop, ct);
+        return await InstallWorkshopItemAsync(workshop, item, receipts.GetValueOrDefault(selectedId)?.Workshop, ct);
     }
 
     static async Task<State> InstallWorkshopItemAsync(WorkshopFiles workshop, WorkshopItem item, WorkshopOrigin? previous,
         CancellationToken ct, SteamSession? session = null)
     {
         var choices = new List<Choice> { new("steampipe", "Install from Steam", "Use the branch of the current game installation") };
+        if (ActiveMods().WorkshopInstallations().TryGetValue(item.Id, out var badge))
+            choices.Insert(0, new("", "Active profile", "", Badge: badge));
         if (item.Download is not null && (previous is null || previous.Manifest is null))
             choices.Add(new("direct", "Import public download", $"Workshop item {item.Id}"));
         choices.Add(new("back", "Back to Workshop", ""));
@@ -1327,7 +1373,15 @@ public static class Entry
             prompt = tcs;
             state = new("prompt", message, Prompt: kind, Choices: choices, PromptId: ++promptId);
         }
-        try { return await tcs.Task.WaitAsync(ct); }
+        try
+        {
+            var value = await tcs.Task.WaitAsync(ct);
+            const string categoryPrefix = "workshop-section:";
+            if (kind.StartsWith("workshop-", StringComparison.Ordinal) && value.StartsWith(categoryPrefix, StringComparison.Ordinal) &&
+                WorkshopSections.Any(section => section.Value == value[categoryPrefix.Length..]))
+                throw new WorkshopSectionChanged(value[categoryPrefix.Length..]);
+            return value;
+        }
         finally { lock (Sync) { if (prompt == tcs) prompt = null; } }
     }
 

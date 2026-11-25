@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Globalization;
 using System.Reflection.PortableExecutable;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -57,6 +58,35 @@ public sealed class ModLibrary(string activeDirectory)
         using var operation = Lock();
         Recover();
         return ReadInstalled();
+    }
+
+    public IReadOnlyDictionary<ulong, string> WorkshopInstallations()
+    {
+        using var operation = Lock();
+        Recover();
+        var paused = LoadingPaused;
+        var result = new Dictionary<ulong, string>();
+        foreach (var package in ReadInstalled().Where(package => package.Workshop is not null))
+        {
+            var root = Location(package.Key, package.Enabled);
+            var enabled = package.Enabled && (package.Modules is null || package.Modules.Any(module => ModuleEnabled(root, module) == true));
+            if (enabled) result[package.Workshop!.ItemId] = paused ? "Installed · Paused" : "Installed";
+            else result.TryAdd(package.Workshop!.ItemId, "Installed · Disabled");
+        }
+        if (!Directory.Exists(active)) return result;
+        foreach (var directory in Directory.EnumerateDirectories(active, "*", new EnumerationOptions { AttributesToSkip = FileAttributes.ReparsePoint }))
+        {
+            if (!ulong.TryParse(Path.GetFileName(directory), NumberStyles.None, CultureInfo.InvariantCulture, out var id) ||
+                id == 0 || (result.TryGetValue(id, out var status) && status != "Installed · Disabled")) continue;
+            try
+            {
+                if (PrepareModules(directory, CancellationToken.None, normalize: false, allowEmpty: true).Length != 0)
+                    result[id] = paused ? "Installed · Paused" : "Installed";
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or
+                JsonException or BadImageFormatException) { }
+        }
+        return result;
     }
 
     public bool LoadingPaused => File.Exists(PauseMarker);
