@@ -9,6 +9,7 @@ public sealed record ModModule(string Id, string Manifest, string Version, strin
 public sealed record ModModuleState(ModModule Module, bool? Enabled);
 public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled, WorkshopOrigin? Workshop = null,
     ModModule[]? Modules = null);
+public sealed record ModPreset(string Id, string Name, int Packages);
 
 public sealed class ModLibrary(string activeDirectory)
 {
@@ -17,6 +18,11 @@ public sealed class ModLibrary(string activeDirectory)
     string Parent => Path.GetDirectoryName(active)!;
     string Disabled => Payload.SafePath(Parent, ".disabled-mods");
     string PauseMarker => Payload.SafePath(Parent, ".mod-loading-paused");
+    string PresetRoot => Payload.SafePath(Parent, ".mod-presets");
+    string PendingPreset => Payload.SafePath(Parent, ".mod-preset-pending.json");
+
+    sealed record PresetPackage(string Key, bool Enabled, Dictionary<string, bool> Modules);
+    sealed record PresetManifest(ModPreset Preset, PresetPackage[] Packages);
 
     public sealed class PreparedImport : IDisposable
     {
@@ -205,11 +211,130 @@ public sealed class ModLibrary(string activeDirectory)
         using var operation = Lock();
         Recover();
         var current = Get(key);
+        return MoveEnabled(current, enabled);
+    }
+
+    InstalledMod MoveEnabled(InstalledMod current, bool enabled)
+    {
         if (current.Enabled == enabled) return current;
-        var destination = Location(key, enabled);
+        var destination = Location(current.Key, enabled);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        Directory.Move(Location(key, current.Enabled), destination);
+        Directory.Move(Location(current.Key, current.Enabled), destination);
         return current with { Enabled = enabled };
+    }
+
+    public IReadOnlyList<ModPreset> Presets()
+    {
+        using var operation = Lock();
+        Recover();
+        return ReadPresets().Select(item => item.Preset).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public ModPreset CreatePreset(string name)
+    {
+        name = name.Trim();
+        if (!ValidPresetName(name)) throw new ArgumentException("Enter a preset name of 1–64 characters.");
+        using var operation = Lock();
+        Recover();
+        if (ReadPresets().Any(item => item.Preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("A mod preset with this name already exists.");
+        var packages = ReadInstalled().Select(package =>
+        {
+            var root = Location(package.Key, package.Enabled);
+            var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (var module in package.Modules ?? [])
+                if (ModuleEnabled(root, module) is bool enabled) states.Add(module.Id, enabled);
+            return new PresetPackage(package.Key, package.Enabled, states);
+        }).ToArray();
+        if (packages.Length == 0) throw new InvalidOperationException("Import a mod before creating a preset.");
+        var preset = new ModPreset(Guid.NewGuid().ToString("N"), name, packages.Length);
+        Directory.CreateDirectory(PresetRoot);
+        WritePreset(PresetPath(preset.Id), new(preset, packages));
+        return preset;
+    }
+
+    public void ApplyPreset(string id, CancellationToken ct)
+    {
+        using var operation = Lock();
+        Recover();
+        var preset = ReadPreset(PresetPath(id)) ?? throw new InvalidDataException("The mod preset is unavailable.");
+        ct.ThrowIfCancellationRequested();
+        WritePreset(PendingPreset, preset);
+        CompletePendingPreset();
+    }
+
+    public void DeletePreset(string id)
+    {
+        using var operation = Lock();
+        Recover();
+        File.Delete(PresetPath(id));
+    }
+
+    string PresetPath(string id)
+    {
+        if (!Guid.TryParseExact(id, "N", out _)) throw new InvalidDataException("Invalid mod preset ID.");
+        return Payload.SafePath(PresetRoot, id + ".json");
+    }
+
+    IEnumerable<PresetManifest> ReadPresets()
+    {
+        if (!Directory.Exists(PresetRoot)) yield break;
+        foreach (var file in Directory.EnumerateFiles(PresetRoot, "*.json"))
+        {
+            var id = Path.GetFileNameWithoutExtension(file);
+            if (Guid.TryParseExact(id, "N", out _) && ReadPreset(PresetPath(id)) is { } manifest && manifest.Preset.Id == id)
+                yield return manifest;
+        }
+    }
+
+    static PresetManifest? ReadPreset(string path)
+    {
+        if (!File.Exists(path)) return null;
+        using var input = File.OpenRead(path);
+        var preset = JsonSerializer.Deserialize<PresetManifest>(input);
+        if (preset?.Preset is null || !Guid.TryParseExact(preset.Preset.Id, "N", out _) || !ValidPresetName(preset.Preset.Name) ||
+            preset.Packages is null || preset.Packages.Length != preset.Preset.Packages || preset.Packages.Any(package =>
+                package is null || !Guid.TryParseExact(package.Key, "N", out _) || package.Modules is null ||
+                !package.Modules.Keys.All(ValidModuleName) ||
+                package.Modules.Keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != package.Modules.Count) ||
+            preset.Packages.Select(package => package.Key).Distinct(StringComparer.Ordinal).Count() != preset.Packages.Length)
+            throw new InvalidDataException("The mod preset is invalid.");
+        return preset;
+    }
+
+    static bool ValidPresetName(string? name) => name is { Length: >= 1 and <= 64 } && !name.Any(char.IsControl);
+
+    static void WritePreset(string path, PresetManifest preset)
+    {
+        var staging = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var output = new FileStream(staging, FileMode.CreateNew))
+            {
+                JsonSerializer.Serialize(output, preset);
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(staging, path);
+        }
+        finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
+
+    void CompletePendingPreset()
+    {
+        var pending = ReadPreset(PendingPreset);
+        if (pending is null) return;
+        var installed = ReadInstalled().ToDictionary(package => package.Key, StringComparer.Ordinal);
+        foreach (var target in pending.Packages)
+        {
+            if (!installed.TryGetValue(target.Key, out var current)) continue;
+            current = MoveEnabled(current, target.Enabled);
+            var root = Location(current.Key, current.Enabled);
+            var states = new Dictionary<string, bool>(target.Modules, StringComparer.OrdinalIgnoreCase);
+            foreach (var module in current.Modules ?? [])
+                if (states.TryGetValue(module.Id, out var enabled) && ModuleEnabled(root, module) is not null)
+                    SetModuleEnabled(root, module, enabled);
+        }
+        File.Delete(PendingPreset);
     }
 
     public IReadOnlyList<ModModuleState> Modules(string key)
@@ -360,6 +485,7 @@ public sealed class ModLibrary(string activeDirectory)
             if (Guid.TryParseExact(name.AsSpan(".removed-mod-".Length), "N", out _))
                 Directory.Delete(Payload.SafePath(Parent, name), recursive: true);
         }
+        CompletePendingPreset();
     }
 
     static void WriteReceipt(string path, InstalledMod mod)

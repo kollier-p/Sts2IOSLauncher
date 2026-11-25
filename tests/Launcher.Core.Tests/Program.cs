@@ -372,6 +372,14 @@ try
     Assert(mods.Modules(replacementMod.Key).Single().Enabled == false, "Package replacement preserves module-level choices");
     mods.SetModuleEnabled(replacementMod.Key, "TestMod", true);
     Assert(mods.EnabledModuleIds().Contains("TestMod"), "A module can be re-enabled after replacement");
+    var preset = mods.CreatePreset("Enabled");
+    mods.SetModuleEnabled(replacementMod.Key, "TestMod", false);
+    mods.SetEnabled(replacementMod.Key, false);
+    var modScope = Path.GetDirectoryName(modsRoot)!;
+    var pendingPreset = Path.Combine(modScope, ".mod-preset-pending.json");
+    File.Copy(Path.Combine(modScope, ".mod-presets", preset.Id + ".json"), pendingPreset);
+    Assert(new ModLibrary(modsRoot).EnabledModuleIds().Contains("TestMod") && !File.Exists(pendingPreset),
+        "Interrupted preset application resumes and restores package and module choices");
     mods.Remove(installedMod.Key);
     Assert(mods.List().Count == 0, "Managed mod removal clears its install directory");
     Reject(() => mods.PrepareArchiveAsync(CreateModZip("Bad mod", "../invalid", "bad"), CancellationToken.None).GetAwaiter().GetResult());

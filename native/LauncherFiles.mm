@@ -12,6 +12,14 @@
 @implementation LauncherFile
 @end
 
+@interface LauncherFileSelection : NSObject
+@property(nonatomic,copy) NSArray<NSURL *> *items;
+@property(nonatomic) BOOL move;
+@end
+
+@implementation LauncherFileSelection
+@end
+
 static BOOL launcherFileInside(NSURL *location, NSURL *root) {
     NSString *path=location.URLByStandardizingPath.path;
     NSString *base=root.URLByStandardizingPath.path;
@@ -23,6 +31,7 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
 @property(nonatomic,strong) NSURL *root;
 @property(nonatomic,strong) NSURL *folder;
 @property(nonatomic,strong) NSURL *preview;
+@property(nonatomic,strong) LauncherFileSelection *clipboard;
 @property(nonatomic,copy) NSArray<LauncherFile *> *files;
 @property(nonatomic,copy) NSString *sort;
 @property(nonatomic) NSUInteger loadGeneration;
@@ -35,23 +44,33 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
     self.title=top?@"Launcher files":self.folder.lastPathComponent;
     if(top) self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
         target:self action:@selector(closeFiles)];
+    self.tableView.allowsMultipleSelectionDuringEditing=YES;
+    self.tableView.rowHeight=56;
+    self.refreshControl=[UIRefreshControl new];
+    [self.refreshControl addTarget:self action:@selector(loadFiles) forControlEvents:UIControlEventValueChanged];
+    [self configureFileActions];
+}
+- (void)configureFileActions {
     __weak LauncherFiles *weakSelf=self;
+    UIAction *paste=[UIAction actionWithTitle:@"Paste items" image:[UIImage systemImageNamed:@"clipboard"] identifier:nil
+        handler:^(__unused UIAction *a){ [weakSelf pasteFiles]; }];
+    if(!self.clipboard.items.count)paste.attributes=UIMenuElementAttributesDisabled;
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"plus"] menu:
             [UIMenu menuWithChildren:@[
                 [UIAction actionWithTitle:@"Import files" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
                     handler:^(__unused UIAction *a){ [weakSelf importFiles]; }],
                 [UIAction actionWithTitle:@"New folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
-                    handler:^(__unused UIAction *a){ [weakSelf askForName:nil]; }]
+                    handler:^(__unused UIAction *a){ [weakSelf askForName:nil]; }],
+                paste
             ]]],
-        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"line.3.horizontal.decrease"] menu:[self sortMenu]]
+        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"line.3.horizontal.decrease"] menu:[self sortMenu]],
+        self.editButtonItem
     ];
-    self.tableView.rowHeight=56;
-    self.refreshControl=[UIRefreshControl new];
-    [self.refreshControl addTarget:self action:@selector(loadFiles) forControlEvents:UIControlEventValueChanged];
 }
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self configureFileActions];
     [self loadFiles];
 }
 - (void)closeFiles { [self dismissViewControllerAnimated:YES completion:nil]; }
@@ -64,7 +83,7 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
             LauncherFiles *browser=weakSelf;
             if(!browser)return;
             browser.sort=key;
-            browser.navigationItem.rightBarButtonItems.lastObject.menu=[browser sortMenu];
+            [browser configureFileActions];
             [browser loadFiles];
         }];
         action.state=[self.sort isEqualToString:key]?UIMenuElementStateOn:UIMenuElementStateOff;
@@ -113,6 +132,7 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
             empty.textAlignment=NSTextAlignmentCenter;
             self.tableView.backgroundView=rows.count?nil:empty;
             [self.tableView reloadData];
+            [self updateSelectionActions];
         });
     });
 }
@@ -128,12 +148,13 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
     return cell;
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if(self.editing){ [self updateSelectionActions]; return; }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     LauncherFile *file=self.files[indexPath.row];
     if(!launcherFileInside(file.url,self.root)){[self showFileError:@"This file is no longer available."];return;}
     if(file.directory){
         LauncherFiles *next=[[LauncherFiles alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        next.root=self.root;next.folder=file.url;next.sort=self.sort;
+        next.root=self.root;next.folder=file.url;next.sort=self.sort;next.clipboard=self.clipboard;
         [self.navigationController pushViewController:next animated:YES];
         return;
     }
@@ -143,23 +164,92 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
     viewer.dataSource=self;
     [self.navigationController pushViewController:viewer animated:YES];
 }
+- (void)tableView:(UITableView *)tableView didDeselectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if(self.editing)[self updateSelectionActions];
+}
+- (void)setEditing:(BOOL)editing animated:(BOOL)animated {
+    [super setEditing:editing animated:animated];
+    [self.navigationController setToolbarHidden:!editing animated:animated];
+    [self updateSelectionActions];
+}
+- (void)updateSelectionActions {
+    if(!self.editing)return;
+    NSArray<UIBarButtonItem *> *actions=@[
+        [[UIBarButtonItem alloc] initWithTitle:@"Copy" style:UIBarButtonItemStylePlain target:self action:@selector(copySelected)],
+        [[UIBarButtonItem alloc] initWithTitle:@"Move" style:UIBarButtonItemStylePlain target:self action:@selector(moveSelected)],
+        [[UIBarButtonItem alloc] initWithTitle:@"Export" style:UIBarButtonItemStylePlain target:self action:@selector(exportSelected)]
+    ];
+    for(UIBarButtonItem *action in actions)action.enabled=self.tableView.indexPathsForSelectedRows.count!=0;
+    [self setToolbarItems:actions animated:NO];
+}
+- (NSArray<NSURL *> *)selectedFiles {
+    NSMutableArray<NSURL *> *selection=[NSMutableArray array];
+    for(NSIndexPath *index in self.tableView.indexPathsForSelectedRows)
+        if((NSUInteger)index.row<self.files.count)[selection addObject:self.files[index.row].url];
+    return selection;
+}
+- (void)copySelected { [self saveClipboard:[self selectedFiles] move:NO]; }
+- (void)moveSelected { [self saveClipboard:[self selectedFiles] move:YES]; }
+- (void)exportSelected { [self exportFiles:[self selectedFiles]]; }
+- (void)saveClipboard:(NSArray<NSURL *> *)items move:(BOOL)move {
+    if(items.count==0)return;
+    self.clipboard.items=items;
+    self.clipboard.move=move;
+    if(self.editing)[self setEditing:NO animated:YES];
+    [self configureFileActions];
+}
+- (void)pasteFiles {
+    NSArray<NSURL *> *items=self.clipboard.items;
+    NSURL *folder=self.folder,*root=self.root;
+    BOOL move=self.clipboard.move;
+    self.clipboard.items=nil;
+    [self configureFileActions];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+        NSFileManager *manager=[NSFileManager defaultManager];
+        NSMutableArray<NSURL *> *failed=[NSMutableArray array];
+        for(NSURL *item in items){
+            NSURL *destination=[folder URLByAppendingPathComponent:item.lastPathComponent];
+            NSString *itemPrefix=[item.path stringByAppendingString:@"/"];
+            if(!launcherFileInside(item,root) || !launcherFileInside(destination,root) ||
+                [folder.path hasPrefix:itemPrefix] || [folder.path isEqualToString:item.path]){
+                [failed addObject:item];continue;
+            }
+            if(move && [item.path isEqualToString:destination.path])continue;
+            BOOL success=move?[manager moveItemAtURL:item toURL:destination error:nil]:
+                [manager copyItemAtURL:item toURL:destination error:nil];
+            if(!success)[failed addObject:item];
+        }
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(failed.count && !self.clipboard.items.count){self.clipboard.items=failed;self.clipboard.move=move;}
+            [self configureFileActions];
+            [self loadFiles];
+            if(failed.count && self.navigationController.topViewController==self && !self.presentedViewController)
+                [self showFileError:@"Some items could not be pasted. Check for an existing item with the same name."];
+        });
+    });
+}
 - (NSInteger)numberOfPreviewItemsInPreviewController:(QLPreviewController *)controller { return self.preview?1:0; }
 - (id<QLPreviewItem>)previewController:(QLPreviewController *)controller previewItemAtIndex:(NSInteger)index {
     return (id<QLPreviewItem>)self.preview;
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
     point:(CGPoint)point {
+    if(self.editing)return nil;
     NSURL *item=self.files[indexPath.row].url;
     __weak LauncherFiles *weakSelf=self;
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray *suggested){
         UIAction *exportAction=[UIAction actionWithTitle:@"Export copy" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil
             handler:^(__unused UIAction *a){[weakSelf exportFile:item];}];
+        UIAction *copy=[UIAction actionWithTitle:@"Copy" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
+            handler:^(__unused UIAction *a){[weakSelf saveClipboard:@[item] move:NO];}];
+        UIAction *move=[UIAction actionWithTitle:@"Move" image:[UIImage systemImageNamed:@"folder"] identifier:nil
+            handler:^(__unused UIAction *a){[weakSelf saveClipboard:@[item] move:YES];}];
         UIAction *rename=[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"] identifier:nil
             handler:^(__unused UIAction *a){[weakSelf askForName:item];}];
         UIAction *remove=[UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"] identifier:nil
             handler:^(__unused UIAction *a){[weakSelf confirmDeletion:item];}];
         remove.attributes=UIMenuElementAttributesDestructive;
-        return [UIMenu menuWithChildren:@[exportAction,rename,remove]];
+        return [UIMenu menuWithChildren:@[exportAction,copy,move,rename,remove]];
     }];
 }
 - (void)showFileError:(NSString *)message {
@@ -204,10 +294,15 @@ static BOOL launcherFileInside(NSURL *location, NSURL *root) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)exportFile:(NSURL *)item {
-    if(!launcherFileInside(item,self.root) || ![[NSFileManager defaultManager] fileExistsAtPath:item.path]){
-        [self showFileError:@"This file is no longer available."];return;
-    }
-    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForExportingURLs:@[item] asCopy:YES];
+    [self exportFiles:@[item]];
+}
+- (void)exportFiles:(NSArray<NSURL *> *)items {
+    if(!items.count)return;
+    for(NSURL *item in items)
+        if(!launcherFileInside(item,self.root) || ![[NSFileManager defaultManager] fileExistsAtPath:item.path]){
+            [self showFileError:@"A selected file is no longer available."];return;
+        }
+    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForExportingURLs:items asCopy:YES];
     [self presentViewController:picker animated:YES completion:nil];
 }
 - (void)importFiles {
@@ -254,6 +349,7 @@ static UIViewController *launcherFileBrowser(NSURL *documents) {
     LauncherFiles *browser=[[LauncherFiles alloc] initWithStyle:UITableViewStyleInsetGrouped];
     browser.root=documents.URLByResolvingSymlinksInPath.URLByStandardizingPath;
     browser.folder=browser.root;
+    browser.clipboard=[LauncherFileSelection new];
     browser.sort=@"name";
     return [[UINavigationController alloc] initWithRootViewController:browser];
 }

@@ -676,10 +676,12 @@ public static class Entry
             var installed = library.List();
             var paused = library.LoadingPaused;
             var choices = new List<Choice> { new("loading", paused ? "Resume mod loading" : "Pause mod loading",
-                "Applies to this mod folder at the next launch") };
+                "Applies to this mod folder at the next launch"),
+                new("presets", "Mod presets", "Save and switch package and module settings") };
             choices.AddRange(installed.Select(mod => new Choice(mod.Key, mod.Label,
                 $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}")));
             var selected = await Ask("mod", "Installed mod packages", ct, choices.ToArray());
+            if (selected == "presets") return await BrowseModPresetsAsync(library, ct);
             if (selected == "loading")
             {
                 ct.ThrowIfCancellationRequested();
@@ -707,6 +709,48 @@ public static class Entry
             library.Remove(selected);
             return new("idle", "Mod package removed.");
         }) ? 0 : -1;
+
+    static async Task<State> BrowseModPresetsAsync(ModLibrary library, CancellationToken ct)
+    {
+        var presets = library.Presets();
+        var choices = new List<Choice> { new("create", "Save current settings", "Create a preset for this mod folder") };
+        choices.AddRange(presets.Select(preset => new Choice(preset.Id, preset.Name, $"{preset.Packages} packages")));
+        var selected = await Ask("mod-presets", "Mod presets", ct, choices.ToArray());
+        if (selected == "create")
+        {
+            if (library.List().Count == 0) return new("idle", "Install a mod to create a preset.");
+            var name = (await Ask("mod-preset-name", "Name this mod preset", ct)).Trim();
+            if (name.Length is < 1 or > 64 || name.Any(char.IsControl))
+                return new("error", "Enter a preset name between 1 and 64 characters.");
+            if (presets.Any(preset => preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                return new("error", "A preset with that name already exists.");
+            ct.ThrowIfCancellationRequested();
+            return new("idle", $"Saved mod preset {library.CreatePreset(name).Name}.");
+        }
+        var preset = presets.SingleOrDefault(item => item.Id == selected) ?? throw new InvalidDataException("Invalid mod preset.");
+        var action = await Ask("mod-preset-action", preset.Name, ct,
+            [new("apply", "Apply preset", "Apply the saved settings to packages in this mod folder"),
+             new("remove", "Remove preset", "Delete this configuration"),
+             new("keep", "Keep current settings", "Return to the launcher")]);
+        if (action == "apply")
+        {
+            Publish(new("mods", "Applying mod preset…"));
+            library.ApplyPreset(selected, ct);
+            return new("idle", $"Applied {preset.Name}.");
+        }
+        if (action == "remove")
+        {
+            var confirm = await Ask("mod-preset-remove", $"Remove {preset.Name}?", ct,
+                [new("keep", "Keep preset", ""), new("remove", "Remove preset", "")]);
+            if (confirm == "remove")
+            {
+                ct.ThrowIfCancellationRequested();
+                library.DeletePreset(selected);
+                return new("idle", "Mod preset removed.");
+            }
+        }
+        return new("idle", "Mod settings kept.");
+    }
 
     static async Task<State> BrowseModModulesAsync(ModLibrary library, InstalledMod package, CancellationToken ct)
     {
@@ -1110,7 +1154,28 @@ public static class Entry
         var modLibrary = new ModLibrary(paths.ModsDirectory);
         var mods = modLibrary.RuntimeDirectory();
         launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
+        Publish(new("verify", "Checking game runtime compatibility…"));
+        if (Launcher.Adapters.GameCompatibilityAudit.FirstIssue(plan.GameAssembly, activeProfile.IsolateSaves,
+            activeProfile.IsolateMods || launchProfilePaths.ModsPaused) is { } issue)
+        {
+            HostDiagnostics.Error("check game assembly compatibility", new NotSupportedException(issue));
+            return new("error", issue);
+        }
         var support = Path.GetDirectoryName(payloads.Root)!;
+        var adapter = Path.Combine(support, "RuntimeAdapters", plan.Receipt.PayloadId);
+        Directory.CreateDirectory(adapter);
+        var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
+        if (!File.Exists(harmony)) return new("error", "The selected installation is missing its Harmony runtime.");
+        try
+        {
+            Launcher.Adapters.Rewriter.Prepare("harmony", harmony, Path.Combine(managed, "STS2JitSupport.dll"),
+                Path.Combine(adapter, "0Harmony.dll"));
+        }
+        catch (NotSupportedException error)
+        {
+            HostDiagnostics.Error("prepare Harmony", error);
+            return new("error", "The selected game build uses a Harmony runtime that needs an iOS adapter.");
+        }
         launchOptions = OptionsStore(payloads).Load();
         WebDavAutomation? automation = null;
         if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay } webDav)
@@ -1121,11 +1186,6 @@ public static class Entry
                 return new("idle", "Launch cancelled. Use WebDAV save sync to review the connection or conflicts.");
         }
         Publish(new("verify", "Preparing runtime files…"));
-        var adapter = Path.Combine(support, "RuntimeAdapters", plan.Receipt.PayloadId);
-        Directory.CreateDirectory(adapter);
-        var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
-        if (!File.Exists(harmony)) throw new FileNotFoundException("The verified game payload is missing Harmony.", harmony);
-        Launcher.Adapters.Rewriter.Prepare("harmony", harmony, Path.Combine(managed, "STS2JitSupport.dll"), Path.Combine(adapter, "0Harmony.dll"));
 
         // Work on a copy so the versioned installation stays verifiable.
         var pack = Path.Combine(documents, "StS2.pck");
@@ -1201,10 +1261,12 @@ public static class Entry
     {
         try
         {
+            HostDiagnostics.Stage("install game compatibility hooks");
             GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException());
             GameCompatibility.ApplyLaunchOptions(launchOptions);
+            HostDiagnostics.Stage("game compatibility hooks installed");
             return 0;
         }
         catch (Exception error)

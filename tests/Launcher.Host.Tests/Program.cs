@@ -1,7 +1,10 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Launcher.Adapters;
 using Launcher.Host;
 using Launcher.Steam;
+using Mono.Cecil;
+using Mono.Cecil.Cil;
 
 unsafe
 {
@@ -112,6 +115,37 @@ var cycleRejected = false;
 try { await WorkshopDependencyOrder.MissingAsync(1, new HashSet<ulong>(), Requirements, CancellationToken.None); }
 catch (InvalidDataException) { cycleRejected = true; }
 Check(cycleRejected, "Workshop rejects cyclic dependency graphs");
+
+var compatibilityDirectory = Directory.CreateTempSubdirectory("sts2-compat-").FullName;
+try
+{
+    var gamePath = Path.Combine(compatibilityDirectory, "fixture.dll");
+    using var fixture = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition("FixtureGame", new Version(1, 0)),
+        "FixtureGame", ModuleKind.Dll);
+    var module = fixture.MainModule;
+    var main = new TypeDefinition("GodotPlugins.Game", "Main", TypeAttributes.Class, module.TypeSystem.Object);
+    module.Types.Add(main);
+    var initializeGame = new MethodDefinition("InitializeFromGameProject", MethodAttributes.Static | MethodAttributes.Private, module.TypeSystem.Byte);
+    initializeGame.CustomAttributes.Add(new CustomAttribute(module.ImportReference(typeof(UnmanagedCallersOnlyAttribute).GetConstructor(Type.EmptyTypes)!)));
+    foreach (var parameter in new[] { module.TypeSystem.IntPtr, module.TypeSystem.IntPtr, module.TypeSystem.IntPtr, module.TypeSystem.Int32 })
+        initializeGame.Parameters.Add(new ParameterDefinition(parameter));
+    initializeGame.Body.GetILProcessor().Emit(OpCodes.Ldc_I4_1);
+    initializeGame.Body.GetILProcessor().Emit(OpCodes.Ret);
+    main.Methods.Add(initializeGame);
+    var node = new TypeDefinition("MegaCrit.Sts2.Core.Nodes", "NGame", TypeAttributes.Class, module.TypeSystem.Object);
+    module.Types.Add(node);
+    var platform = new MethodDefinition("InitializePlatform", MethodAttributes.Private, module.ImportReference(typeof(Task<bool>)));
+    platform.Body.GetILProcessor().Emit(OpCodes.Ldnull);
+    platform.Body.GetILProcessor().Emit(OpCodes.Ret);
+    node.Methods.Add(platform);
+    fixture.Write(gamePath);
+    Check(GameCompatibilityAudit.FirstIssue(gamePath, false, false) is null, "The expected Godot and platform methods pass audit");
+    Check(GameCompatibilityAudit.FirstIssue(gamePath, true, false)?.Contains("save hooks") == true,
+        "An isolated profile detects a missing save hook before switching to Godot");
+    Check(GameCompatibilityAudit.FirstIssue(gamePath, false, true)?.Contains("mod path") == true,
+        "Isolated and paused mods require the scanner signature");
+}
+finally { Directory.Delete(compatibilityDirectory, recursive: true); }
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 

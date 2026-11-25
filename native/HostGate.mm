@@ -73,6 +73,7 @@ static Status copyStatus;
         target:self action:@selector(closeLog)];
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(shareLog:)],
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemSearch target:self action:@selector(searchLog)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(refreshLog)]
     ];
     self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous"]];
@@ -81,6 +82,7 @@ static Status copyStatus;
     self.navigationItem.titleView=self.source;
     self.output=[UITextView new];
     self.output.editable=NO;
+    self.output.findInteractionEnabled=YES;
     self.output.font=[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     self.output.translatesAutoresizingMaskIntoConstraints=NO;
     [self.view addSubview:self.output];
@@ -113,7 +115,8 @@ static Status copyStatus;
         [file closeAndReturnError:nil];
     }
     self.output.text=text.length?text:@"No entries are available for this log.";
-    self.navigationItem.rightBarButtonItems.firstObject.enabled=text.length>0;
+    self.navigationItem.rightBarButtonItems[0].enabled=text.length>0;
+    self.navigationItem.rightBarButtonItems[1].enabled=text.length>0;
     [self.output scrollRangeToVisible:NSMakeRange(self.output.text.length,0)];
 }
 - (NSURL *)logURL {
@@ -125,6 +128,7 @@ static Status copyStatus;
     share.popoverPresentationController.barButtonItem=sender;
     [self presentViewController:share animated:YES completion:nil];
 }
+- (void)searchLog { [self.output.findInteraction presentFindNavigatorShowingReplace:NO]; }
 - (void)closeLog { [self dismissViewControllerAnimated:YES completion:nil]; }
 @end
 
@@ -385,6 +389,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if([kind isEqual:@"profile-name"]) title=@"Launch profile";
     if([kind hasPrefix:@"webdav-"]) title=@"WebDAV";
     if([kind hasPrefix:@"nexus-"]) title=@"Nexus Mods";
+    if([kind hasPrefix:@"mod-"]) title=@"Mods";
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     self.prompt=alert;
     if([kind isEqual:@"confirm"]){
