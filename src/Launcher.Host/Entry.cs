@@ -10,7 +10,7 @@ using SteamKit2.Authentication;
 
 namespace Launcher.Host;
 
-// Entry points called by the native host via coreclr_create_delegate.
+// Entry points called by the native Mono host.
 public static class Entry
 {
     static readonly object Sync = new();

@@ -31,6 +31,64 @@ static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
 static Status copyStatus;
 
+static NSString *startManagedLauncher(NSString *library, NSString *managed, NSString *frameworks,
+                                     NSString *payload, NSString *documents) {
+    void *lib = dlopen(library.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
+    if (!lib) return [NSString stringWithFormat:@"Could not load the Mono framework (%s).", dlerror() ?: "unknown error"];
+
+    auto init = (InitRuntime)dlsym(lib, "sts2_initialize_game_runtime");
+    auto get = (GetDelegate)dlsym(lib, "sts2_host_delegate");
+    if (!init || !get) return @"The Mono framework is missing a launcher entry point.";
+
+    int result = init(managed.UTF8String, nullptr, frameworks.UTF8String);
+    if (result == -2) return @"The launcher’s JIT execution check failed. Enable JIT for this app and reopen it.";
+    if (result != 0) return [NSString stringWithFormat:@"Mono configuration failed (%d).", result];
+
+    const struct { const char *name; void **target; } bindings[] = {
+        {"Initialize", (void **)&initHost},
+        {"BeginDownload", (void **)&beginDownload},
+        {"BeginImport", (void **)&beginImport},
+        {"BrowseVersions", (void **)&browseVersions},
+        {"BrowseProfiles", (void **)&browseProfiles},
+        {"BrowseSnapshots", (void **)&browseSnapshots},
+        {"BeginSnapshotImport", (void **)&beginSnapshotImport},
+        {"BrowseWebDav", (void **)&browseWebDav},
+        {"BrowseSteamCloud", (void **)&browseSteamCloud},
+        {"BrowseMods", (void **)&browseMods},
+        {"BeginModImport", (void **)&beginModImport},
+        {"BrowseWorkshop", (void **)&browseWorkshop},
+        {"BrowseNexus", (void **)&browseNexus},
+        {"BrowseLaunchOptions", (void **)&browseLaunchOptions},
+        {"BeginGameBackgroundSync", (void **)&beginGameBackgroundSync},
+        {"GameBackgroundSyncActive", (void **)&gameBackgroundSyncActive},
+        {"CancelGameBackgroundSync", (void **)&cancelGameBackgroundSync},
+        {"Reply", (void **)&reply},
+        {"Cancel", (void **)&cancelOperation},
+        {"ForgetSession", (void **)&forgetSession},
+        {"Prepare", (void **)&prepareGame},
+        {"CopyStatus", (void **)&copyStatus},
+    };
+    for (const auto &binding : bindings) {
+        result = get(binding.name, binding.target);
+        if (result != 0 || !*binding.target)
+            return [NSString stringWithFormat:@"Could not bind Launcher.Host.%s (0x%08x).", binding.name, (unsigned)result];
+    }
+
+    result = initHost(payload.UTF8String, documents.UTF8String, managed.UTF8String);
+    return result == 0 ? nil : [NSString stringWithFormat:@"Managed launcher startup failed (%d).", result];
+}
+
+static void recordStartupFailure(NSString *documents, NSString *failure) {
+    NSLog(@"Launcher startup failed: %@", failure);
+    NSString *directory = [documents stringByAppendingPathComponent:@"LauncherLogs"];
+    if (!directory || ![[NSFileManager defaultManager] createDirectoryAtPath:directory
+        withIntermediateDirectories:YES attributes:nil error:nullptr]) return;
+    NSString *revision = [NSBundle.mainBundle objectForInfoDictionaryKey:@"STS2GitRevision"] ?: @"unknown";
+    NSString *log = [NSString stringWithFormat:@"%@\nBuild %@\n%@\n", NSDate.date, revision, failure];
+    [log writeToFile:[directory stringByAppendingPathComponent:@"startup.log"] atomically:YES
+            encoding:NSUTF8StringEncoding error:nullptr];
+}
+
 @interface LauncherChoices : UITableViewController<NSURLSessionTaskDelegate>
 @property(nonatomic,copy) NSArray<NSDictionary *> *choices;
 @property(nonatomic,copy) void (^selectValue)(NSString *value);
@@ -137,7 +195,7 @@ static BOOL workshopImageURL(NSURL *url) {
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemSearch target:self action:@selector(searchLog)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(refreshLog)]
     ];
-    self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous"]];
+    self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous",@"Startup"]];
     self.source.selectedSegmentIndex=0;
     [self.source addTarget:self action:@selector(refreshLog) forControlEvents:UIControlEventValueChanged];
     self.navigationItem.titleView=self.source;
@@ -181,7 +239,7 @@ static BOOL workshopImageURL(NSURL *url) {
     [self.output scrollRangeToVisible:NSMakeRange(self.output.text.length,0)];
 }
 - (NSURL *)logURL {
-    NSArray<NSString *> *sources=@[@"launcher.log",@"godot.log",@"godot.log.previous"];
+    NSArray<NSString *> *sources=@[@"launcher.log",@"godot.log",@"godot.log.previous",@"startup.log"];
     return [self.directory URLByAppendingPathComponent:sources[self.source.selectedSegmentIndex]];
 }
 - (void)shareLog:(UIBarButtonItem *)sender {
@@ -364,30 +422,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
         NSString *support=NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,NSUserDomainMask,YES).firstObject;
         NSString *payload=[support stringByAppendingPathComponent:@"STS2Payloads"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
-            void *lib=dlopen(library.fileSystemRepresentation,RTLD_NOW|RTLD_GLOBAL);
-            if(!lib) NSLog(@"Launcher runtime load failed: %s", dlerror());
-            auto init=lib?(InitRuntime)dlsym(lib,"sts2_initialize_game_runtime"):nullptr;
-            auto get=lib?(GetDelegate)dlsym(lib,"sts2_host_delegate"):nullptr;
-            int rc=-1;
-            if(init&&get&&(rc=init(managed.UTF8String,nullptr,frameworks.UTF8String))==0 &&
-               get("Initialize",(void**)&initHost)==0 && get("BeginDownload",(void**)&beginDownload)==0 &&
-               get("BeginImport",(void**)&beginImport)==0 && get("BrowseVersions",(void**)&browseVersions)==0 &&
-               get("BrowseProfiles",(void**)&browseProfiles)==0 &&
-               get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
-               get("BeginSnapshotImport",(void**)&beginSnapshotImport)==0 &&
-               get("BrowseWebDav",(void**)&browseWebDav)==0 &&
-               get("BrowseSteamCloud",(void**)&browseSteamCloud)==0 &&
-               get("BrowseMods",(void**)&browseMods)==0 && get("BeginModImport",(void**)&beginModImport)==0 &&
-               get("BrowseWorkshop",(void**)&browseWorkshop)==0 && get("BrowseNexus",(void**)&browseNexus)==0 &&
-               get("BrowseLaunchOptions",(void**)&browseLaunchOptions)==0 &&
-               get("BeginGameBackgroundSync",(void**)&beginGameBackgroundSync)==0 &&
-               get("GameBackgroundSyncActive",(void**)&gameBackgroundSyncActive)==0 &&
-               get("CancelGameBackgroundSync",(void**)&cancelGameBackgroundSync)==0 &&
-               get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
-               get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
-                rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
-            else if(rc==0)rc=-20;
-            dispatch_async(dispatch_get_main_queue(),^{self.initializing=NO;self.initialized=rc==0;if(rc!=0){[self.timer invalidate];self.message.text=[NSString stringWithFormat:@"Runtime initialization failed (%d). Restart after enabling JIT.",rc];}});
+            NSString *failure = startManagedLauncher(library, managed, frameworks, payload, docs);
+            if (failure) recordStartupFailure(docs, failure);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.initializing = NO;
+                self.initialized = failure == nil;
+                if (failure) {
+                    [self.timer invalidate];
+                    self.message.text = failure;
+                }
+            });
         });return;
     }
     char buffer[8192];
