@@ -30,6 +30,7 @@ unsafe
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
+    delegate* unmanaged[Cdecl]<int> signIn = &Entry.SignInSteam;
     delegate* unmanaged[Cdecl]<int> startHooks = &Entry.StartGameHooks;
 
     Check(prepare() == -1, "An uninitialized host rejects launch");
@@ -49,6 +50,7 @@ unsafe
     Check(beginGameSync() == -1 && gameSyncActive() == 0, "Background save sync requires the opt-in game launch context");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
+    Check(signIn() == -1, "The Steam session command waits for the launcher host");
 
     var temp = Directory.CreateTempSubdirectory("sts2-native-host-");
     var root = Marshal.StringToCoTaskMemUTF8(Path.Combine(temp.FullName, "payloads"));
@@ -100,6 +102,9 @@ Check(WorkshopManifest.ResolveBranch(workshopBranches, "public-beta")?.Id == 101
     WorkshopManifest.ResolveBranch(workshopBranches, "public")?.Id == 100 &&
     WorkshopManifest.ResolveBranch(workshopBranches, "unknown") is null,
     "Workshop author snapshots preserve branch bounds and do not mislabel the default manifest");
+Check(WorkshopManifest.Recommended(workshopBranches, "public-beta")?.Id == 101 &&
+    WorkshopManifest.Recommended(workshopBranches, "preview") is { Id: 102, Branch: "preview" },
+    "Workshop defaults to the installed branch and uses the default manifest when Steam has no matching snapshot");
 const string workshopJson = """
     {"queries":[{"queryKey":["workshop_browse",{"appid":2868840}],"state":{"data":{"eresult":1,"current_page":2,
     "total_pages":5,"results":[{"consumer_appid":2868840,"publishedfileid":"18446744073709551615",

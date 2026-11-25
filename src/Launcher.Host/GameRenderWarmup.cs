@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Runtime.Loader;
 
 namespace Launcher.Host;
 
@@ -62,8 +61,10 @@ internal sealed class GameRenderWarmup
         started = true;
         try
         {
-            var godot = AssemblyLoadContext.Default.Assemblies.First(assembly => assembly.GetName().Name == "GodotSharp");
-            var warmup = new GameRenderWarmup(__instance, godot);
+            var node = __instance.GetType();
+            while (node is not null && node.FullName != "Godot.Node") node = node.BaseType;
+            if (node is null) throw new TypeLoadException("The game menu is not a Godot node.");
+            var warmup = new GameRenderWarmup(__instance, node.Assembly);
             warmup.processFrame.AddEventHandler(warmup.tree, warmup.callback);
         }
         catch (Exception error) { HostDiagnostics.Error("schedule optional render warmup", error); }

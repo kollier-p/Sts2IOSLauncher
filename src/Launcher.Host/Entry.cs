@@ -1025,10 +1025,13 @@ public static class Entry
             else if (WorkshopFiles.ParseId(selection) is ulong selected && results.Items.Any(item => item.Id == selected))
             {
                 try { feedback = (await OpenWorkshopItemAsync(workshop, selected, ct, session)).Message; }
-                catch (Exception error) when (error is InvalidDataException or IOException or HttpRequestException or TimeoutException or UnauthorizedAccessException)
+                catch (Exception error) when (error is InvalidDataException or IOException or HttpRequestException or
+                    TimeoutException or UnauthorizedAccessException or NotSupportedException or BadImageFormatException or JsonException or
+                    System.Security.Cryptography.CryptographicException)
                 {
                     HostDiagnostics.Error($"Workshop item {selected}", error);
                     feedback = error is InvalidDataException ? WorkshopDataError(error) : "Steam could not finish the Workshop installation. Try again.";
+                    if (error is InvalidDataException) HostDiagnostics.Stage($"Workshop validation: {feedback}");
                 }
             }
             else return new("idle", "Workshop browsing cancelled.");
@@ -1291,7 +1294,9 @@ public static class Entry
             catch (InvalidDataException error) when (operation == "Steam Workshop")
             {
                 HostDiagnostics.Error(operation, error);
-                result = new("error", WorkshopDataError(error));
+                var detail = WorkshopDataError(error);
+                HostDiagnostics.Stage($"Workshop validation: {detail}");
+                result = new("error", detail);
             }
             catch (NotSupportedException) when (operation is "Archive import" or "Mod import" or "Steam Workshop" or "Nexus Mods")
             {
