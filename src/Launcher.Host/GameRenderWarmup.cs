@@ -8,67 +8,43 @@ internal sealed class GameRenderWarmup
 {
     const int DrawSize = 48;
     const int BatchSize = 4;
-    const string CatalogFile = "startup-assets-v1.txt";
-
-    static readonly string[] Assets =
-    [
-        "res://images/packed/combat_ui/end_turn_button.png",
-        "res://images/packed/combat_ui/end_turn_button_glow.png",
-        "res://images/packed/sprite_fonts/ironclad_energy_icon.png",
-        "res://images/packed/sprite_fonts/silent_energy_icon.png",
-        "res://images/packed/sprite_fonts/regent_energy_icon.png",
-        "res://images/atlases/intent_atlas.sprites/intent_attack.tres",
-        "res://images/atlases/intent_atlas.sprites/intent_defend.tres",
-        "res://materials/cards/banners/card_banner_common_mat.tres",
-        "res://materials/cards/banners/card_banner_uncommon_mat.tres",
-        "res://materials/cards/banners/card_banner_rare_mat.tres",
-        "res://materials/cards/banners/card_banner_status_mat.tres",
-        "res://materials/cards/banners/card_banner_curse_mat.tres",
-        "res://materials/cards/frames/card_frame_red_mat.tres",
-        "res://materials/cards/frames/card_frame_green_mat.tres",
-        "res://materials/cards/frames/card_frame_blue_mat.tres",
-        "res://materials/cards/frames/card_frame_pink_mat.tres",
-        "res://materials/cards/frames/card_frame_orange_mat.tres",
-        "res://materials/cards/frames/card_frame_colorless_mat.tres",
-        "res://scenes/cards/card_portrait_blur_material.tres",
-        "res://scenes/cards/card_canvas_group_blur_material.tres",
-        "res://scenes/cards/card_canvas_group_mask_material.tres",
-        "res://shaders/vfx/common/vfx_flipbook_shader.gdshader",
-        "res://shaders/vfx/common/vfx_row_flipbook_shader.gdshader",
-        "res://shaders/hsv.gdshader",
-        "res://scenes/vfx/hit_spark_vfx.tscn",
-        "res://scenes/vfx/vfx_damage_num.tscn",
-        "res://scenes/vfx/vfx_attack_slash.tscn",
-        "res://scenes/vfx/vfx_attack_blunt.tscn",
-        "res://scenes/vfx/vfx_block.tscn",
-        "res://scenes/vfx/vfx_shiv_throw.tscn",
-        "res://scenes/vfx/vfx_poison_impact.tscn"
-    ];
+    const int DrawSlots = 8;
+    const int SceneDrawLimit = 4;
 
     static readonly List<object> RetainedAssets = [];
     static bool started;
+    static Task? gamePreload;
     internal static string? CatalogDirectory { private get; set; }
+    internal static bool Extended { private get; set; }
 
     readonly Assembly godot;
+    readonly bool extended;
+    readonly bool gpuParticles;
+    readonly TimeSpan timeLimit;
     readonly object owner, tree, root;
     readonly EventInfo processFrame;
     readonly Delegate callback;
-    readonly MethodInfo load, exists, addChild, queueFree, isInsideTree;
-    readonly object reuse, childMode, updateOnce, updateDisabled;
+    readonly MethodInfo load, exists, listDirectory, addChild, queueFree, isInsideTree, isValid;
+    readonly object reuse, childMode, updateOnce, updateAlways, updateDisabled;
     readonly PropertyInfo updateMode, guiDisableInput;
     readonly string? catalogPath;
+    readonly GameWarmupVisuals visuals;
+    readonly GameWarmupMemory? memory;
     readonly Stopwatch elapsed = Stopwatch.StartNew();
     readonly List<string> available = [];
-    string[] work = Assets;
+    readonly HashSet<GameWarmupVisuals.Preview> drawn = [];
+    string[] work = [];
     object? overlay, status, progress, viewport;
     bool? originalInputDisabled;
-    bool cachedCatalog;
-    int nextAsset, loaded, submitted, failed, waitFrames;
+    bool cachedCatalog, batchHasParticles, waitingForGame;
+    int nextAsset, loaded, submitted, sceneDraws, particleDraws, failed, waitFrames;
 
     GameRenderWarmup(object owner, Assembly godot)
     {
         this.owner = owner;
         this.godot = godot;
+        extended = Extended;
+        timeLimit = TimeSpan.FromSeconds(extended ? 60 : 12);
         var node = Godot("Node");
         tree = node.GetMethod("GetTree", Type.EmptyTypes)!.Invoke(owner, null)!;
         var sceneTree = Godot("SceneTree");
@@ -80,16 +56,28 @@ internal sealed class GameRenderWarmup
             method.GetParameters().Length == 3);
         reuse = Enum.Parse(load.GetParameters()[2].ParameterType, "Reuse");
         exists = loader.GetMethod("Exists", [typeof(string), typeof(string)])!;
+        listDirectory = loader.GetMethod("ListDirectory", [typeof(string)])!;
         var internalMode = Godot("Node+InternalMode");
         addChild = node.GetMethod("AddChild", [node, typeof(bool), internalMode])!;
         childMode = Enum.Parse(internalMode, "Disabled");
         queueFree = node.GetMethod("QueueFree", Type.EmptyTypes)!;
         isInsideTree = node.GetMethod("IsInsideTree", Type.EmptyTypes)!;
+        isValid = Godot("GodotObject").GetMethod("IsInstanceValid", [Godot("GodotObject")])!;
         updateMode = Godot("SubViewport").GetProperty("RenderTargetUpdateMode")!;
         updateOnce = Enum.Parse(updateMode.PropertyType, "Once");
+        updateAlways = Enum.Parse(updateMode.PropertyType, "Always");
         updateDisabled = Enum.Parse(updateMode.PropertyType, "Disabled");
         guiDisableInput = Godot("Viewport").GetProperty("GuiDisableInput")!;
-        if (CatalogDirectory is { } directory) catalogPath = Path.Combine(directory, CatalogFile);
+        visuals = new GameWarmupVisuals(Godot);
+        if (extended)
+        {
+            var renderingServer = Godot("RenderingServer");
+            memory = new GameWarmupMemory(renderingServer, Godot("RenderingServer+RenderingInfo"));
+            var method = renderingServer.GetMethod("GetCurrentRenderingMethod", Type.EmptyTypes)!.Invoke(null, null) as string;
+            gpuParticles = method is "mobile" or "gl_compatibility" or "forward_plus";
+        }
+        if (CatalogDirectory is { } directory)
+            catalogPath = Path.Combine(directory, extended ? "startup-assets-extended-v1.txt" : "startup-assets-v1.txt");
     }
 
     public static void MainMenuReady(object __instance)
@@ -107,6 +95,8 @@ internal sealed class GameRenderWarmup
         catch (Exception error) { HostDiagnostics.Error("schedule startup preload", error); }
     }
 
+    public static void TrackGamePreload(Task __result) => gamePreload = __result;
+
     Type Godot(string type) => godot.GetType("Godot." + type, throwOnError: true)!;
     object New(string type, params object[] inputs) => Activator.CreateInstance(Godot(type), inputs)!;
     static void Set(object target, string property, object value) => target.GetType().GetProperty(property)!.SetValue(target, value);
@@ -123,17 +113,25 @@ internal sealed class GameRenderWarmup
     {
         try
         {
-            if (isInsideTree.Invoke(owner, null) is not true || elapsed.Elapsed > TimeSpan.FromSeconds(12))
+            if (isValid.Invoke(null, [owner]) is not true || isInsideTree.Invoke(owner, null) is not true)
             {
-                Finish(completed: false);
+                Finish("menu closed");
+                return;
+            }
+            if (elapsed.Elapsed > timeLimit)
+            {
+                Finish("time limit");
                 return;
             }
             if (overlay is null)
             {
                 ShowOverlay();
                 RestoreCatalog();
+                if (!cachedCatalog)
+                    work = GameWarmupAssets.Discover(extended, directory => (string[])listDirectory.Invoke(null, [directory])!);
                 Set(progress!, "MaxValue", (double)work.Length);
-                HostDiagnostics.Stage($"startup preload {(cachedCatalog ? "cached catalog" : "discovering assets")} ({work.Length} candidates)");
+                HostDiagnostics.Stage($"startup preload {(extended ? "extended" : "standard")}, " +
+                    $"{(cachedCatalog ? "cached catalog" : "discovering assets")} ({work.Length} candidates)");
                 // Let the loading screen present before any resource load.
                 return;
             }
@@ -149,34 +147,50 @@ internal sealed class GameRenderWarmup
             }
             if (nextAsset == work.Length)
             {
-                Finish(completed: true);
+                if (extended && gamePreload is { IsCompleted: false })
+                {
+                    if (!waitingForGame)
+                    {
+                        waitingForGame = true;
+                        Set(status!, "Text", "Finishing the game’s built-in preload");
+                        Set(progress!, "Indeterminate", true);
+                        HostDiagnostics.Stage("startup preload waiting for game resources");
+                    }
+                    return;
+                }
+                Finish();
                 return;
             }
 
             var batch = Stopwatch.StartNew();
             int draws = 0;
-            for (int i = 0; i < BatchSize && nextAsset < work.Length; i++)
+            batchHasParticles = false;
+            for (int i = 0; i < BatchSize && nextAsset < work.Length && draws <= DrawSlots - SceneDrawLimit; i++)
             {
+                if (memory?.LimitReached() is { } limit)
+                {
+                    Finish(limit);
+                    return;
+                }
                 var path = work[nextAsset++];
-                Set(status!, "Text", (path.EndsWith(".tscn", StringComparison.Ordinal)
-                    ? "Loading combat effects" : "Preparing textures and shaders") + $"  ·  {nextAsset}/{work.Length}");
-                if (LoadAsset(path, draws)) draws++;
+                draws += LoadAsset(path, draws);
                 if (batch.ElapsedMilliseconds >= 6) break;
             }
+            Set(status!, "Text", $"{GameWarmupAssets.Phase(work[nextAsset - 1])}  ·  {nextAsset}/{work.Length}");
             Set(progress!, "Value", (double)nextAsset);
             if (viewport is not null)
             {
                 Add(root, viewport);
-                updateMode.SetValue(viewport, updateOnce);
+                updateMode.SetValue(viewport, batchHasParticles ? updateAlways : updateOnce);
                 submitted += draws;
-                // Give the renderer a full frame before freeing the offscreen canvas.
-                waitFrames = 1;
+                // Particles need consecutive frames to exercise simulation and draw.
+                waitFrames = batchHasParticles ? 3 : 1;
             }
         }
         catch (Exception error)
         {
             HostDiagnostics.Error("startup preload", error);
-            Finish(completed: false);
+            Finish("error");
         }
     }
 
@@ -229,10 +243,11 @@ internal sealed class GameRenderWarmup
         if (catalogPath is null || !File.Exists(catalogPath)) return;
         try
         {
-            if (new FileInfo(catalogPath).Length > 8192) return;
-            var known = File.ReadAllLines(catalogPath).ToHashSet(StringComparer.Ordinal);
-            var candidates = Assets.Where(known.Contains).ToArray();
-            if (candidates.Length == 0 || candidates.Length != known.Count) return;
+            if (new FileInfo(catalogPath).Length > 128 * 1024) return;
+            var candidates = File.ReadAllLines(catalogPath);
+            if (candidates.Length is 0 or > GameWarmupAssets.MaxCandidates ||
+                candidates.Distinct(StringComparer.Ordinal).Count() != candidates.Length ||
+                candidates.Any(path => !GameWarmupAssets.IsAllowed(path, extended))) return;
             work = candidates;
             cachedCatalog = true;
         }
@@ -257,64 +272,84 @@ internal sealed class GameRenderWarmup
         }
     }
 
-    bool LoadAsset(string path, int slot)
+    int LoadAsset(string path, int slot)
     {
-        if (!cachedCatalog && exists.Invoke(null, [path, ""]) is not true) return false;
+        if (!cachedCatalog && exists.Invoke(null, [path, ""]) is not true) return 0;
         var resource = load.Invoke(null, [path, "", reuse]);
         if (resource is null)
         {
             failed++;
             HostDiagnostics.Stage($"startup preload could not load {path}");
-            return false;
+            return 0;
         }
         available.Add(path);
         RetainedAssets.Add(resource);
         loaded++;
 
-        // Loading a PackedScene also caches its dependency resources. Combat scripts
-        // and effects run only when the game itself instantiates the scene.
-        var drawable = CreateDrawable(resource);
-        if (drawable is null) return false;
+        if (visuals.IsTexture(resource)) return Draw(new(resource, null), slot) ? 1 : 0;
+        if (visuals.IsCanvasMaterial(resource)) return Draw(new(null, resource), slot) ? 1 : 0;
+        if (visuals.IsCanvasShader(resource))
+        {
+            var material = New("ShaderMaterial");
+            Set(material, "Shader", resource);
+            return Draw(new(null, material), slot) ? 1 : 0;
+        }
+        if (!extended || !visuals.SceneType.IsInstanceOfType(resource)) return 0;
+
+        int count = 0;
+        foreach (var preview in visuals.ReadScene(resource, gpuParticles))
+        {
+            if (!Draw(preview, slot + count)) continue;
+            sceneDraws++;
+            if (++count == SceneDrawLimit) break;
+        }
+        return count;
+    }
+
+    bool Draw(GameWarmupVisuals.Preview preview, int slot)
+    {
+        if (!drawn.Add(preview)) return false;
+        var drawable = CreateDrawable(preview);
         if (viewport is null)
         {
             viewport = New("SubViewport");
-            Set(viewport, "Size", New("Vector2I", BatchSize * DrawSize, DrawSize));
+            Set(viewport, "Size", New("Vector2I", DrawSlots * DrawSize, DrawSize));
             updateMode.SetValue(viewport, updateDisabled);
         }
-        Set(drawable, "Position", New("Vector2", (float)(slot * DrawSize), 0f));
-        Set(drawable, "Size", New("Vector2", (float)DrawSize, (float)DrawSize));
+        bool particles = preview.ParticleMaterial is not null;
+        float center = particles ? DrawSize / 2f : 0f;
+        Set(drawable, "Position", New("Vector2", slot * DrawSize + center, center));
+        if (!particles) Set(drawable, "Size", New("Vector2", (float)DrawSize, (float)DrawSize));
         Add(viewport, drawable);
         return true;
     }
 
-    object? CreateDrawable(object resource)
+    object CreateDrawable(GameWarmupVisuals.Preview preview)
     {
-        if (Godot("Texture2D").IsInstanceOfType(resource))
+        object drawable;
+        if (preview.ParticleMaterial is { } particleMaterial)
         {
-            var texture = New("TextureRect");
-            Set(texture, "Texture", resource);
-            SetEnum(texture, "ExpandMode", "IgnoreSize");
-            return texture;
+            drawable = New("GpuParticles2D");
+            Set(drawable, "Amount", 4);
+            Set(drawable, "Lifetime", 0.5);
+            Set(drawable, "Preprocess", 0.15);
+            Set(drawable, "ProcessMaterial", particleMaterial);
+            if (preview.Texture is { } particleTexture) Set(drawable, "Texture", particleTexture);
+            batchHasParticles = true;
+            particleDraws++;
         }
-
-        var material = Godot("ShaderMaterial").IsInstanceOfType(resource) ? resource : null;
-        var shader = material?.GetType().GetProperty("Shader")?.GetValue(material) ?? resource;
-        var shaderType = Godot("Shader");
-        if (!shaderType.IsInstanceOfType(shader) ||
-            shaderType.GetMethod("GetMode", Type.EmptyTypes)!.Invoke(shader, null)?.ToString() != "CanvasItem")
-            return null;
-
-        if (material is null)
+        else if (preview.Texture is { } texture)
         {
-            material = New("ShaderMaterial");
-            Set(material, "Shader", shader);
+            drawable = New("TextureRect");
+            Set(drawable, "Texture", texture);
+            SetEnum(drawable, "ExpandMode", "IgnoreSize");
         }
-        var rect = New("ColorRect");
-        Set(rect, "Material", material);
-        return rect;
+        else drawable = New("ColorRect");
+        if (preview.Material is { } material) Set(drawable, "Material", material);
+        return drawable;
     }
 
-    void Finish(bool completed)
+    void Finish(string? reason = null)
     {
         try
         {
@@ -322,10 +357,11 @@ internal sealed class GameRenderWarmup
             if (originalInputDisabled is { } disabled) guiDisableInput.SetValue(root, disabled);
             if (overlay is not null) queueFree.Invoke(overlay, null);
             if (viewport is not null) queueFree.Invoke(viewport, null);
-            if (completed) SaveCatalog();
+            if (reason is null) SaveCatalog();
         }
         catch (Exception error) { HostDiagnostics.Error("close startup preload", error); }
-        HostDiagnostics.Stage($"startup preload {(completed ? "complete" : "stopped")}: {loaded} resources, {submitted} offscreen draws, " +
+        HostDiagnostics.Stage($"startup preload {(reason is null ? "complete" : $"stopped ({reason})")}: " +
+            $"{loaded} resources, {submitted} offscreen draws ({sceneDraws} scene, {particleDraws} particle), " +
             $"{failed} failed, {elapsed.ElapsedMilliseconds} ms");
     }
 }

@@ -227,10 +227,15 @@ try
     var profileSettings = Path.Combine(root, "profiles.json");
     var optionSettings = Path.Combine(root, "launch-options.json");
     var options = new GameLaunchOptionsStore(optionSettings);
-    Assert(options.Load() is { FrameLimit: null, TouchAsMouse: null, RenderWarmup: true },
-        "Startup preload defaults to on while frame rate and touch follow the game");
+    Assert(options.Load() is { FrameLimit: null, TouchAsMouse: null, RenderWarmup: true, ExtendedWarmup: true },
+        "Startup preload defaults to extended while frame rate and touch follow the game");
     File.WriteAllText(optionSettings, """{"FrameLimit":60}""");
-    Assert(options.Load() is { FrameLimit: 60, RenderWarmup: true }, "Older settings inherit the preload default");
+    Assert(options.Load() is { FrameLimit: 60, RenderWarmup: true, ExtendedWarmup: true }, "Older settings inherit extended preload");
+    File.WriteAllText(optionSettings, """{"RenderWarmup":false}""");
+    Assert(!options.Load().RenderWarmup, "An older preload opt-out still disables the pass");
+    var standard = new GameLaunchOptions(60, true, ExtendedWarmup: false);
+    options.Save(standard);
+    Assert(options.Load() == standard, "Standard preload survives a restart");
     var overrides = new GameLaunchOptions(120, false, RenderWarmup: false);
     options.Save(overrides);
     Assert(new GameLaunchOptionsStore(optionSettings).Load() == overrides, "Launch settings and preload opt-out survive a restart");

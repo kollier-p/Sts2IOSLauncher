@@ -468,7 +468,8 @@ public static class Entry
                     { null => "Game setting", 0 => "Uncapped", int fps => $"{fps} FPS" }),
                  new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
                     { null => "Game setting", true => "On", false => "Off" }),
-                 new("warmup", "Startup asset preload", currentOptions.RenderWarmup ? "On" : "Off"),
+                 new("warmup", "Startup asset preload",
+                     !currentOptions.RenderWarmup ? "Off" : currentOptions.ExtendedWarmup ? "Extended" : "Standard"),
                  new("reset", "Restore defaults", "Restore default launch settings")]);
             if (action == "fps")
             {
@@ -490,9 +491,10 @@ public static class Entry
             else if (action == "warmup")
             {
                 var value = await Ask("launch-warmup", "Startup asset preload", ct,
-                    [new("on", "On", "Prepare card textures, shaders and common combat effects before the menu"),
+                    [new("extended", "Extended", "Prepare more card art, shaders, animations and combat effects"),
+                     new("standard", "Standard", "Prepare a small set of card materials and combat effects"),
                      new("off", "Off", "Use normal game startup")]);
-                currentOptions = currentOptions with { RenderWarmup = value == "on" };
+                currentOptions = currentOptions with { RenderWarmup = value != "off", ExtendedWarmup = value == "extended" };
             }
             else if (action == "reset") currentOptions = new();
             else throw new InvalidDataException("Choose a launch setting.");

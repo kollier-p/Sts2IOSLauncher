@@ -96,10 +96,25 @@ internal static class GameCompatibility
                 var menu = game.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu");
                 var ready = menu?.GetMethod("_Ready", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
                 if (ready?.ReturnType == typeof(void))
+                {
+                    GameRenderWarmup.Extended = options.ExtendedWarmup;
                     Patch(ready, typeof(GameRenderWarmup).GetMethod(nameof(GameRenderWarmup.MainMenuReady), Flags)!, "postfix");
+                }
                 else HostDiagnostics.Stage("startup preload unavailable for this game version");
             }
             catch (Exception error) { HostDiagnostics.Error("install startup preload", error); }
+            if (options.ExtendedWarmup)
+            {
+                try
+                {
+                    var manager = game.GetType("MegaCrit.Sts2.Core.Assets.PreloadManager");
+                    var preload = manager?.GetMethod("LoadCommonAndMainMenuAssets", Flags, binder: null,
+                        types: Type.EmptyTypes, modifiers: null);
+                    if (preload?.ReturnType == typeof(Task))
+                        Patch(preload, typeof(GameRenderWarmup).GetMethod(nameof(GameRenderWarmup.TrackGamePreload), Flags)!, "postfix");
+                }
+                catch (Exception error) { HostDiagnostics.Error("track game preload", error); }
+            }
         }
         if (options.FrameLimit is null && options.TouchAsMouse is null) return;
         var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");
