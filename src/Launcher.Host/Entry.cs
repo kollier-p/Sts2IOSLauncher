@@ -1653,8 +1653,16 @@ public static class Entry
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int ReportGameMemoryWarning()
+    {
+        GameMemory.Log("iPadOS sent the game a memory warning");
+        return 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int PrepareGameShutdown()
     {
+        GameSession.End();
         GameKeyboard.Detach();
         GameRenderWarmup.EndSession();
         HostDiagnostics.Stage("closing game engine");

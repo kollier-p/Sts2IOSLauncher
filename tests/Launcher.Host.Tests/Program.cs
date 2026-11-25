@@ -36,6 +36,7 @@ unsafe
     delegate* unmanaged[Cdecl]<int> startHooks = &Entry.StartGameHooks;
     delegate* unmanaged[Cdecl]<nint, int, int> sendGameKey = &Entry.SendGameKey;
     delegate* unmanaged[Cdecl]<int> releaseGameKeys = &Entry.ReleaseGameKeys;
+    delegate* unmanaged[Cdecl]<int> reportGameMemoryWarning = &Entry.ReportGameMemoryWarning;
     delegate* unmanaged[Cdecl]<int> prepareGameShutdown = &Entry.PrepareGameShutdown;
     delegate* unmanaged[Cdecl]<int> gameDidQuit = &Entry.GameDidQuit;
 
@@ -58,6 +59,7 @@ unsafe
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(sendGameKey(0, 0) == -1 && releaseGameKeys() == 0,
         "The game controls are safe before Godot creates a scene");
+    Check(reportGameMemoryWarning() == 0, "Memory warning diagnostics are safe before initialization");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
     Check(signIn() == -1, "The Steam session command waits for the launcher host");
 
@@ -163,6 +165,16 @@ unsafe
         temp.Delete(recursive: true);
     }
 }
+
+var preloadPolicy = typeof(Entry).Assembly.GetType("Launcher.Host.GameAssetPreload", throwOnError: true)!
+    .GetMethod("IsLowMemoryMenuPreload", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+bool defersPreload(string name, ulong? available) => preloadPolicy.Invoke(null, [name, available]) is true;
+const ulong mib = 1024 * 1024;
+Check(defersPreload("Common", 597 * mib) && defersPreload("MainMenu", 0),
+    "Desktop menu preloads yield under process memory pressure");
+Check(!defersPreload("Common", 1024 * mib) && !defersPreload("Common", null) &&
+    !defersPreload("MainMenuEssentials", 0) && !defersPreload("Combat Room", 0),
+    "The memory guard preserves essential and gameplay loads and leaves healthy and unmeasured devices alone");
 
 Check(SteamCloudSaves.LocalPath("%GameInstall%\\modded\\profile2\\saves\\progress.save", false) ==
     "modded/profile2/saves/progress.save", "Steam Auto-Cloud paths preserve modded saves");

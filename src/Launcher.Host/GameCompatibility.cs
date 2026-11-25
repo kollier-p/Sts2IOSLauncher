@@ -136,6 +136,11 @@ internal static class GameCompatibility
         if (ios)
         {
             ConfigureSessionControls(__instance, godot, game);
+            if (game is not null)
+            {
+                try { GameAssetPreload.Install(game, (load, prefix) => Patch(load, prefix), GameMemory.AvailableBytes); }
+                catch (Exception error) { HostDiagnostics.Error("install game menu preload memory guard", error); }
+            }
             if (!pendingSafeMode) PatchUnsupportedMouseCalls(godot);
         }
         ApplyGodotOptions(options, godot);
@@ -170,13 +175,27 @@ internal static class GameCompatibility
                     nameof(GameSession.AsyncGameQuitPostfix);
                 Patch(gameQuit, typeof(GameSession).GetMethod(postfix)!, "postfix");
             }
-
-            var launchMenu = gameType?.GetMethod("LaunchMainMenu", Flags,
-                binder: null, types: [typeof(bool)], modifiers: null);
-            if (launchMenu?.ReturnType == typeof(Task))
-                Patch(launchMenu, typeof(GameSession).GetMethod(nameof(GameSession.LaunchMainMenuPrefix))!);
         }
         catch (Exception error) { HostDiagnostics.Error("configure game quit", error); }
+
+        try
+        {
+            var methods = game?.GetType("MegaCrit.Sts2.Core.Nodes.NGame")?.GetMethods(Flags);
+            var gameReturn = methods?.SingleOrDefault(method => method.Name == "ReturnToMainMenu" &&
+                !method.IsStatic && method.ReturnType == typeof(Task));
+            if (gameReturn is not null)
+            {
+                Patch(gameReturn, typeof(GameSession).GetMethod(nameof(GameSession.ReturnToMainMenuPrefix))!);
+                Patch(gameReturn, typeof(GameSession).GetMethod(nameof(GameSession.ReturnToMainMenuPostfix))!, "postfix");
+            }
+            else HostDiagnostics.Stage("game menu return diagnostics unavailable for this version");
+
+            var loadMenu = methods?.SingleOrDefault(method => method.Name == "LoadMainMenu" &&
+                !method.IsStatic && method.ReturnType == typeof(Task));
+            if (loadMenu is not null)
+                Patch(loadMenu, typeof(GameSession).GetMethod(nameof(GameSession.LoadMainMenuPrefix))!);
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure game menu return diagnostics", error); }
 
         try
         {

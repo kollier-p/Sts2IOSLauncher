@@ -7,6 +7,7 @@ internal static class GameSession
 {
     static WeakReference<object>? mainMenu;
     static MethodInfo? isValid, isMenuVisible;
+    static int menuReturnGeneration;
 
     internal static void ObserveMainMenu(object menu, Assembly godot)
     {
@@ -18,7 +19,7 @@ internal static class GameSession
             ? canvas.GetMethod("IsVisibleInTree", Type.EmptyTypes)!
             : node.GetMethod("IsInsideTree", Type.EmptyTypes)!;
         mainMenu = new(menu);
-        HostDiagnostics.Stage("game main menu ready");
+        GameMemory.Log("game main menu ready");
     }
 
     static bool MainMenuVisible()
@@ -49,7 +50,41 @@ internal static class GameSession
         if (__state) _ = ReturnAfterQuitAsync(__result);
     }
 
-    public static void LaunchMainMenuPrefix() => HostDiagnostics.Stage("game loading its main menu");
+    public static void ReturnToMainMenuPrefix()
+    {
+        GameMemory.Log("returning from the run to the game main menu");
+        if (OperatingSystem.IsIOS())
+            _ = LogMenuReturnMemoryAsync(Interlocked.Increment(ref menuReturnGeneration));
+    }
+
+    public static void LoadMainMenuPrefix() => GameMemory.Log("game loading its main menu scene");
+
+    public static void ReturnToMainMenuPostfix(Task __result) => _ = ObserveMenuReturnAsync(__result);
+
+    internal static void End() => Interlocked.Increment(ref menuReturnGeneration);
+
+    static async Task LogMenuReturnMemoryAsync(int generation)
+    {
+        int elapsed = 0;
+        foreach (int seconds in new[] { 1, 1, 2, 4 })
+        {
+            await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(false);
+            if (Volatile.Read(ref menuReturnGeneration) != generation) return;
+            elapsed += seconds;
+            GameMemory.Log($"game menu return after {elapsed}s");
+        }
+    }
+
+    static async Task ObserveMenuReturnAsync(Task transition)
+    {
+        try
+        {
+            await transition;
+            GameMemory.Log("game finished returning to its main menu");
+        }
+        catch (OperationCanceledException) { HostDiagnostics.Stage("game main menu return cancelled"); }
+        catch (Exception error) { HostDiagnostics.Error("game main menu return failed", error); }
+    }
 
     static async Task ReturnAfterQuitAsync(Task quit)
     {

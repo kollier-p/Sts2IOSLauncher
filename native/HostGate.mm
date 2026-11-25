@@ -32,7 +32,7 @@ static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
     browseLaunchOptions, cancelOperation, prepareGame, prepareSafeGame, signInSteam, forgetSession;
 static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
-static Simple releaseGameKeys, prepareGameShutdown, gameDidQuit;
+static Simple releaseGameKeys, reportGameMemoryWarning, prepareGameShutdown, gameDidQuit;
 static KeyCommand sendGameKey;
 static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
@@ -77,6 +77,7 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
         {"PrepareSafe", (void **)&prepareSafeGame},
         {"SendGameKey", (void **)&sendGameKey},
         {"ReleaseGameKeys", (void **)&releaseGameKeys},
+        {"ReportGameMemoryWarning", (void **)&reportGameMemoryWarning},
         {"PrepareGameShutdown", (void **)&prepareGameShutdown},
         {"GameDidQuit", (void **)&gameDidQuit},
         {"CopyStatus", (void **)&copyStatus},
@@ -487,6 +488,8 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
         name:UIApplicationDidEnterBackgroundNotification object:self.application];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(launcherDidBecomeActive:)
         name:UIApplicationDidBecomeActiveNotification object:self.application];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(gameDidReceiveMemoryWarning:)
+        name:UIApplicationDidReceiveMemoryWarningNotification object:self.application];
     UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";
     heading.font=[UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
     heading.adjustsFontForContentSizeCategory=YES;heading.accessibilityTraits|=UIAccessibilityTraitHeader;heading.numberOfLines=0;
@@ -689,6 +692,9 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     }];
 }
 - (void)launcherDidBecomeActive:(NSNotification *)notification { [self endLauncherBackgroundTask]; }
+- (void)gameDidReceiveMemoryWarning:(NSNotification *)notification {
+    if(gameState==GameState::Running && reportGameMemoryWarning)reportGameMemoryWarning();
+}
 - (void)endLauncherBackgroundTask {
     if(self.launcherBackgroundTask==UIBackgroundTaskInvalid) return;
     UIBackgroundTaskIdentifier task=self.launcherBackgroundTask;
