@@ -25,7 +25,7 @@ static InitHost initHost;
 static Command beginDownload, beginImport, beginModImport, beginSnapshotImport;
 static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
-    browseLaunchOptions, cancelOperation, prepareGame, signInSteam, forgetSession;
+    browseLaunchOptions, cancelOperation, prepareGame, prepareSafeGame, signInSteam, forgetSession;
 static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
 static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
@@ -67,6 +67,7 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
         {"ForgetSession", (void **)&forgetSession},
         {"SignInSteam", (void **)&signInSteam},
         {"Prepare", (void **)&prepareGame},
+        {"PrepareSafe", (void **)&prepareSafeGame},
         {"CopyStatus", (void **)&copyStatus},
     };
     for (const auto &binding : bindings) {
@@ -79,13 +80,12 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
     return result == 0 ? nil : [NSString stringWithFormat:@"Managed launcher startup failed (%d).", result];
 }
 
-static void recordStartupFailure(NSString *documents, NSString *failure) {
-    NSLog(@"Launcher startup failed: %@", failure);
+static void recordStartupStatus(NSString *documents, NSString *status) {
     NSString *directory = [documents stringByAppendingPathComponent:@"LauncherLogs"];
     if (!directory || ![[NSFileManager defaultManager] createDirectoryAtPath:directory
         withIntermediateDirectories:YES attributes:nil error:nullptr]) return;
     NSString *revision = [NSBundle.mainBundle objectForInfoDictionaryKey:@"STS2GitRevision"] ?: @"unknown";
-    NSString *log = [NSString stringWithFormat:@"%@\nBuild %@\n%@\n", NSDate.date, revision, failure];
+    NSString *log = [NSString stringWithFormat:@"%@\nBuild %@\n%@\n", NSDate.date, revision, status];
     [log writeToFile:[directory stringByAppendingPathComponent:@"startup.log"] atomically:YES
             encoding:NSUTF8StringEncoding error:nullptr];
 }
@@ -131,7 +131,9 @@ static BOOL workshopImageURL(NSURL *url) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Choice"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Choice"];
     NSDictionary *choice = self.choices[indexPath.row];
-    cell.selectionStyle=[choice[@"Value"] length]?UITableViewCellSelectionStyleDefault:UITableViewCellSelectionStyleNone;
+    NSString *value=choice[@"Value"];
+    BOOL selectable=value.length && ![value isEqualToString:@"loading"];
+    cell.selectionStyle=selectable?UITableViewCellSelectionStyleDefault:UITableViewCellSelectionStyleNone;
     cell.textLabel.text = choice[@"Title"];
     cell.textLabel.numberOfLines=2;
     cell.detailTextLabel.text = choice[@"Detail"];
@@ -139,7 +141,22 @@ static BOOL workshopImageURL(NSURL *url) {
     cell.accessoryType=[self.selectedValue isEqual:choice[@"Value"]]?UITableViewCellAccessoryCheckmark:UITableViewCellAccessoryNone;
     NSString *badge=[choice[@"Badge"] isKindOfClass:NSString.class]?choice[@"Badge"]:nil;
     cell.accessoryView=nil;
-    if(badge.length){
+    NSNumber *isOn=[choice[@"IsOn"] isKindOfClass:NSNumber.class]?choice[@"IsOn"]:nil;
+    if(isOn && value.length){
+        UISwitch *toggle=[UISwitch new];
+        toggle.on=isOn.boolValue;
+        toggle.accessibilityLabel=choice[@"Title"];
+        __weak LauncherChoices *weakList=self;
+        [toggle addAction:[UIAction actionWithHandler:^(UIAction *action){
+            UISwitch *sender=(UISwitch *)action.sender;
+            LauncherChoices *list=weakList;
+            if(!list.selectValue)return;
+            sender.enabled=NO;
+            list.selectValue([NSString stringWithFormat:@"%@:%@",sender.on?@"enable":@"disable",value]);
+        }] forControlEvents:UIControlEventValueChanged];
+        [toggle sizeToFit];
+        cell.accessoryView=toggle;
+    }else if(badge.length){
         UIButtonConfiguration *style=UIButtonConfiguration.tintedButtonConfiguration;
         style.title=badge;
         style.buttonSize=UIButtonConfigurationSizeMini;
@@ -195,12 +212,13 @@ static BOOL workshopImageURL(NSURL *url) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSString *value=self.choices[indexPath.row][@"Value"];
-    if(value.length && self.selectValue) self.selectValue(value);
+    if(value.length && ![value isEqualToString:@"loading"] && self.selectValue) self.selectValue(value);
 }
 - (void)cancelPressed { self.cancelSelection(); }
 @end
 
 #include "LauncherWorkshop.mm"
+#include "LauncherInstalledMods.mm"
 
 @interface LauncherDiagnostics : UIViewController
 @property(nonatomic,copy) NSURL *directory;
@@ -286,12 +304,14 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UILabel *message,*installation,*profile,*steamAccount;
 @property(nonatomic,strong) UIProgressView *progress;
 @property(nonatomic,strong) UIButton *download,*play,*cancel,*steamSignIn,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
+@property(nonatomic,strong) UIButton *safePlay;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
 @property(nonatomic,strong) UIScrollView *launcherScroll;
 @property(nonatomic,strong) LauncherWorkshop *workshopPane;
-@property(nonatomic,assign) BOOL leavingWorkshop;
+@property(nonatomic,strong) LauncherInstalledMods *installedModsPane;
+@property(nonatomic,assign) BOOL leavingPane;
 @property(nonatomic,strong) NSURL *scopedArchive;
 @property(nonatomic,assign) ArchivePicker archivePicker;
 @property(nonatomic,assign) int64_t shownPromptId;
@@ -352,7 +372,16 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UITextField *f=[UITextField new];f.placeholder=placeholder;f.secureTextEntry=secure;f.borderStyle=UITextBorderStyleRoundedRect;f.autocorrectionType=UITextAutocorrectionTypeNo;f.autocapitalizationType=UITextAutocapitalizationTypeNone;return f;
 }
 - (UIButton*)button:(NSString*)title action:(SEL)action {
-    UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:title forState:UIControlStateNormal];[b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];return b;
+    UIButtonConfiguration *style=UIButtonConfiguration.grayButtonConfiguration;
+    style.title=title;
+    style.buttonSize=UIButtonConfigurationSizeMedium;
+    style.cornerStyle=UIButtonConfigurationCornerStyleMedium;
+    style.titleAlignment=UIButtonConfigurationTitleAlignmentLeading;
+    UIButton *button=[UIButton buttonWithConfiguration:style primaryAction:nil];
+    button.contentHorizontalAlignment=UIControlContentHorizontalAlignmentLeading;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [button.heightAnchor constraintGreaterThanOrEqualToConstant:44].active=YES;
+    return button;
 }
 - (UIStackView *)section:(NSArray<UIView *> *)views {
     UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:views];
@@ -366,12 +395,15 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.view.backgroundColor=UIColor.systemBackgroundColor;
+    self.view.tintColor=UIColor.systemIndigoColor;
     self.launcherBackgroundTask=UIBackgroundTaskInvalid;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(launcherDidEnterBackground:)
         name:UIApplicationDidEnterBackgroundNotification object:self.application];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(launcherDidBecomeActive:)
         name:UIApplicationDidBecomeActiveNotification object:self.application];
-    UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";heading.font=[UIFont boldSystemFontOfSize:30];
+    UILabel *heading=[UILabel new];heading.text=@"Slay the Spire 2";
+    heading.font=[UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
+    heading.adjustsFontForContentSizeCategory=YES;heading.accessibilityTraits|=UIAccessibilityTraitHeader;heading.numberOfLines=0;
     self.installation=[UILabel new];self.installation.text=@"No game installed";self.installation.textColor=UIColor.secondaryLabelColor;
     self.profile=[UILabel new];self.profile.textColor=UIColor.secondaryLabelColor;
     self.steamAccount=[UILabel new];self.steamAccount.textColor=UIColor.secondaryLabelColor;
@@ -383,6 +415,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.steamSignIn=[self button:@"Sign in to Steam" action:@selector(steamSignInPressed)];
     self.forget=[self button:@"Sign out of Steam" action:@selector(forgetPressed)];
     self.play=[self button:@"Play installed game" action:@selector(playPressed)];
+    self.safePlay=[self button:@"Launch without mods or preload" action:@selector(safePlayPressed)];
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
     self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
@@ -402,6 +435,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UIButton *about=[self button:@"About and updates" action:@selector(aboutPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
+    self.message.font=[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    self.message.adjustsFontForContentSizeCategory=YES;
+    self.message.textColor=UIColor.secondaryLabelColor;
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
     playStyle.title=@"Play installed game";
     self.play.configuration=playStyle;
@@ -412,7 +448,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UISegmentedControl *navigation=[[UISegmentedControl alloc] initWithItems:@[@"Play",@"Install",@"Saves",@"Mods",@"Steam",@"Tools"]];
     navigation.selectedSegmentIndex=0;
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
-    UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
+    UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.safePlay,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.branch,self.manifest,self.beta,self.download]];
     UIStackView *steamSection=[self section:@[self.steamAccount,self.steamSignIn,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.importSnapshot,self.steamCloud,self.webDav]];
@@ -431,6 +467,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
+    self.safePlay.enabled=NO;
     self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
     self.steamSignIn.enabled=NO;
     self.timer=[NSTimer timerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
@@ -450,7 +487,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
         NSString *payload=[support stringByAppendingPathComponent:@"STS2Payloads"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
             NSString *failure = startManagedLauncher(library, managed, frameworks, payload, docs);
-            if (failure) recordStartupFailure(docs, failure);
+            if (failure) {
+                NSLog(@"Launcher startup failed: %@", failure);
+                recordStartupStatus(docs, failure);
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.initializing = NO;
                 self.initialized = failure == nil;
@@ -493,6 +533,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.steamSignIn.enabled=idle;
     self.steamSignIn.hidden=steamAccount!=nil;
     self.play.enabled=idle && installed!=nil && profile!=nil;
+    self.safePlay.enabled=self.play.enabled;
     self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
     self.diagnostics.enabled=idle;
@@ -501,6 +542,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
     self.progress.progress=total>0?done/total:0;
+    self.progress.hidden=total<=0;
     if(total>0 && [stage isEqual:@"cloud"]){
         NSString *transferred=[NSByteCountFormatter stringFromByteCount:[state[@"Completed"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
         NSString *expected=[NSByteCountFormatter stringFromByteCount:[state[@"Total"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
@@ -510,9 +552,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
     if(speed>0) message=[message stringByAppendingFormat:@" • %.2f MiB/s",speed/1048576];
     if([state[@"Eta"] isKindOfClass:NSString.class]) message=[message stringByAppendingFormat:@" • %@ remaining",state[@"Eta"]];
     self.message.text=message;
-    if(self.leavingWorkshop){
+    if(self.leavingPane){
         if(!idle)return;
-        self.leavingWorkshop=NO;
+        self.leavingPane=NO;
     }
     if([stage isEqual:@"prompt"]){
         if(self.application.applicationState==UIApplicationStateActive)[self showPrompt:state];
@@ -521,9 +563,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.shownPromptId=0;
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
     if(self.workshopPane)[self.workshopPane showStatus:message progress:total>0?done/total:-1 busy:!idle];
+    if(self.installedModsPane)[self.installedModsPane showStatus:message];
     if([stage isEqual:@"ready"]){
         if(self.application.applicationState!=UIApplicationStateActive)return;
         [self.timer invalidate];self.message.text=@"Starting Godot…";
+        NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
+        recordStartupStatus(documents, @"Starting Godot");
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
         if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
         else{self.message.text=@"Godot startup failed. Restart the app.";}
@@ -554,6 +599,11 @@ static void forward(id service,SEL selector,UIApplication *application) {
     void (^cancel)(void)=^{cancelOperation();weakGate.prompt=nil;};
     if(self.workshopPane){
         [self.workshopPane showPrompt:state reply:submit];
+        return;
+    }
+    if(self.installedModsPane && [kind isEqualToString:@"mod"]){
+        NSArray *choices=[state[@"Choices"] isKindOfClass:NSArray.class]?state[@"Choices"]:@[];
+        [self.installedModsPane showChoices:choices message:message reply:submit];
         return;
     }
     if([state[@"Choices"] isKindOfClass:NSArray.class]){
@@ -604,7 +654,21 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)snapshotsPressed { [self.view endEditing:YES];if(browseSnapshots()!=0)[self showError:@"Another operation is active."]; }
 - (void)webDavPressed { [self.view endEditing:YES];if(browseWebDav()!=0)[self showError:@"Another operation is active."]; }
 - (void)steamCloudPressed { [self.view endEditing:YES];if(browseSteamCloud()!=0)[self showError:@"Another operation is active."]; }
-- (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
+- (void)modsPressed {
+    [self.view endEditing:YES];
+    if(browseMods()!=0){[self showError:@"Another operation is active."];return;}
+    LauncherInstalledMods *pane=[LauncherInstalledMods new];
+    __weak LauncherGate *weakGate=self;
+    pane.close=^{[weakGate closeInstalledMods];};
+    self.installedModsPane=pane;
+    [self attachPane:pane];
+    [pane showStatus:@"Reading installed mods…"];
+}
+- (void)closeInstalledMods {
+    if(!self.installedModsPane)return;
+    [self detachPane:self.installedModsPane];
+    self.installedModsPane=nil;
+}
 - (void)workshopPressed {
     [self.view endEditing:YES];
     if(browseWorkshop()!=0){[self showError:@"Another operation is active."];return;}
@@ -612,6 +676,15 @@ static void forward(id service,SEL selector,UIApplication *application) {
     __weak LauncherGate *weakGate=self;
     pane.close=^{[weakGate closeWorkshop];};
     self.workshopPane=pane;
+    [self attachPane:pane];
+    [pane showStatus:@"Opening Steam Workshop…" progress:-1 busy:YES];
+}
+- (void)closeWorkshop {
+    if(!self.workshopPane)return;
+    [self detachPane:self.workshopPane];
+    self.workshopPane=nil;
+}
+- (void)attachPane:(UIViewController *)pane {
     self.launcherScroll.hidden=YES;
     [self addChildViewController:pane];
     pane.view.translatesAutoresizingMaskIntoConstraints=NO;
@@ -623,18 +696,14 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [pane.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
     ]];
     [pane didMoveToParentViewController:self];
-    [pane showStatus:@"Opening Steam Workshop…" progress:-1 busy:YES];
 }
-- (void)closeWorkshop {
-    LauncherWorkshop *pane=self.workshopPane;
-    if(!pane)return;
-    self.leavingWorkshop=YES;
+- (void)detachPane:(UIViewController *)pane {
+    self.leavingPane=YES;
     cancelOperation();
     [pane.view endEditing:YES];
     [pane willMoveToParentViewController:nil];
     [pane.view removeFromSuperview];
     [pane removeFromParentViewController];
-    self.workshopPane=nil;
     self.launcherScroll.hidden=NO;
 }
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
@@ -754,5 +823,6 @@ static void forward(id service,SEL selector,UIApplication *application) {
     else if(rc!=0)[self showError:@"Unable to start the Steam download."];
 }
 - (void)playPressed { [self.view endEditing:YES];if(prepareGame()!=0)[self showError:@"Another operation is active."]; }
+- (void)safePlayPressed { [self.view endEditing:YES];if(prepareSafeGame()!=0)[self showError:@"Another operation is active."]; }
 - (void)cancelPressed {cancelOperation();}
 @end

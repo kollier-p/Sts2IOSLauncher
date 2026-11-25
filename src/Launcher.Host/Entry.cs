@@ -18,7 +18,7 @@ public static class Entry
     static LaunchProfiles? profiles;
     static LaunchProfile? activeProfile;
     static LaunchProfilePaths? launchProfilePaths;
-    static bool launchHasEnabledMods;
+    static bool launchHasEnabledMods, launchSafeMode;
     static GameLaunchOptions launchOptions = new();
     static GameWebDavSync? gameWebDav;
     static string documents = "", managed = "";
@@ -33,7 +33,8 @@ public static class Entry
     static volatile SavedSteamLogin? steamLogin;
 
     sealed record SavedSteamLogin(SteamIdentity Identity, bool Persistent);
-    sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null, string? Badge = null);
+    sealed record Choice(string Value, string Title, string Detail, string? Thumbnail = null, string? Badge = null,
+        bool? IsOn = null);
     sealed record State(string Stage, string Message, long Completed = 0, long Total = 0, double Speed = 0,
         string? Eta = null, string? Prompt = null, Choice[]? Choices = null, long PromptId = 0,
         string? Installed = null, string? Profile = null, string? SteamAccount = null, bool SteamSessionTemporary = false,
@@ -805,84 +806,110 @@ public static class Entry
         async (_, ct) =>
         {
             var library = ActiveMods();
-            var installed = library.List();
-            var paused = library.LoadingPaused;
-            var choices = new List<Choice> { new("loading", paused ? "Resume mod loading" : "Pause mod loading",
-                "Applies to this mod folder at the next launch"),
-                new("presets", "Mod presets", "Save and switch package and module settings"),
-                new("search", "Search this mod folder", "Find a package by name, note, or module ID"),
-                new("groups", "Browse groups", "Filter installed packages by group") };
-            choices.AddRange(installed.Select(ModChoice));
-            var selected = await Ask("mod", "Installed mod packages", ct, choices.ToArray());
-            if (selected == "presets") return await BrowseModPresetsAsync(library, ct);
-            if (selected == "loading")
+            var message = "Changes apply the next time the game starts.";
+            while (true)
             {
+                var installed = library.List();
+                var paused = library.LoadingPaused;
+                var choices = new List<Choice>
+                {
+                    new("loading", "Load installed mods", "Applies to this profile’s mod folder", IsOn: !paused),
+                    new("presets", "Mod presets", "Save or apply package and module settings"),
+                    new("groups", "Browse groups", "Filter installed packages by group")
+                };
+                choices.AddRange(installed.Select(ModChoice));
+                var selected = await Ask("mod", message, ct, choices.ToArray());
                 ct.ThrowIfCancellationRequested();
-                library.SetLoadingPaused(!paused);
-                return new("idle", paused ? "Mod loading will resume at next launch." : "Mod loading is paused.");
+                try
+                {
+                    if (TryModSwitch(selected, out var key, out var enabled))
+                    {
+                        if (key == "loading")
+                        {
+                            library.SetLoadingPaused(!enabled);
+                            message = enabled ? "Mod loading will resume at next launch." : "Mod loading is paused.";
+                            continue;
+                        }
+                        if (!installed.Any(item => item.Key == key))
+                            throw new InvalidDataException("The selected package is unavailable.");
+                        var updated = library.SetEnabled(key, enabled);
+                        message = $"{updated.DisplayLabel} {(enabled ? "enabled" : "disabled")}.";
+                    }
+                    else message = (await EditInstalledModsAsync(library, installed, selected, ct)).Message;
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    HostDiagnostics.Error("update installed mods", error);
+                    message = "Could not change this mod. Check the launcher log.";
+                }
             }
-            if (selected == "search")
-            {
-                var query = (await Ask("mod-search", "Search installed packages", ct)).Trim();
-                installed = installed.Where(mod => mod.Label.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    mod.DisplayLabel.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    mod.ModuleIds.Any(id => id.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
-            }
-            else if (selected == "groups")
-            {
-                var groups = installed.Select(mod => mod.Group).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                if (groups.Length == 0) return new("idle", "Install a mod package to create groups.");
-                var group = await Ask("mod-groups", "Mod groups", ct, groups.Select((item, index) =>
-                    new Choice(index.ToString(CultureInfo.InvariantCulture), item ?? "Ungrouped", "")).ToArray());
-                if (!int.TryParse(group, NumberStyles.None, CultureInfo.InvariantCulture, out var index) || index >= groups.Length)
-                    throw new InvalidDataException("Invalid mod group.");
-                installed = installed.Where(mod => string.Equals(mod.Group, groups[index], StringComparison.OrdinalIgnoreCase)).ToArray();
-            }
-            if (selected is "search" or "groups")
-            {
-                if (installed.Count == 0) return new("idle", "No installed packages match.");
-                selected = await Ask("mod-matches", "Matching mod packages", ct, installed.Select(ModChoice).ToArray());
-            }
-            var mod = installed.SingleOrDefault(item => item.Key == selected)
-                ?? throw new InvalidDataException("The selected mod is unavailable.");
-            var action = await Ask("mod-action", mod.DisplayLabel, ct,
-                [new("toggle", mod.Enabled ? "Disable package" : "Enable package", "Apply to the selected profile's mod directory"),
-                 new("modules", "Modules and dependencies", "Review versions and module status"),
-                 new("group", "Set group", mod.Group ?? "Ungrouped"),
-                 new("note", "Set note", mod.Note ?? "Use the package name"),
-                 new("remove", "Remove package", "Delete the files installed with this package")]);
-            ct.ThrowIfCancellationRequested();
-            if (action == "modules") return await BrowseModModulesAsync(library, mod, ct);
-            if (action is "group" or "note")
-            {
-                var group = action == "group";
-                var value = (await Ask(group ? "mod-group-name" : "mod-note",
-                    group ? "Enter a group name. Leave blank to ungroup." : "Enter a display note. Leave blank to use the package name.", ct)).Trim();
-                if (value.Length > (group ? 64 : 96) || value.Any(char.IsControl)) return new("error", "Enter a shorter name without control characters.");
-                ct.ThrowIfCancellationRequested();
-                var updated = library.SetPresentation(mod.Key, group ? value : mod.Group, group ? mod.Note : value);
-                return new("idle", $"Updated {updated.DisplayLabel}.");
-            }
-            if (action == "toggle")
-            {
-                library.SetEnabled(selected, !mod.Enabled);
-                return new("idle", mod.Enabled ? "Mod package disabled." : "Mod package enabled.");
-            }
-            if (action != "remove") throw new InvalidDataException("Invalid mod action.");
-            var confirmation = await Ask("remove-mod", "Remove this mod package?", ct,
-                [new("keep", "Keep package", "Return to the launcher"), new("remove", "Remove package", mod.Label)]);
-            if (confirmation != "remove") return new("idle", "Mod package kept.");
-            ct.ThrowIfCancellationRequested();
-            library.Remove(selected);
-            return new("idle", "Mod package removed.");
         }) ? 0 : -1;
+
+    static bool TryModSwitch(string selection, out string key, out bool enabled)
+    {
+        enabled = selection.StartsWith("enable:", StringComparison.Ordinal);
+        var disabled = selection.StartsWith("disable:", StringComparison.Ordinal);
+        key = enabled || disabled ? selection[(selection.IndexOf(':') + 1)..] : "";
+        return enabled || disabled;
+    }
+
+    static async Task<State> EditInstalledModsAsync(ModLibrary library, IReadOnlyList<InstalledMod> installed,
+        string selected, CancellationToken ct)
+    {
+        if (selected == "presets") return await BrowseModPresetsAsync(library, ct);
+        if (selected == "groups")
+        {
+            var groups = installed.Select(mod => mod.Group).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (groups.Length == 0) return new("idle", "Install a mod package to create groups.");
+            var group = await Ask("mod-groups", "Mod groups", ct, groups.Select((item, index) =>
+                new Choice(index.ToString(CultureInfo.InvariantCulture), item ?? "Ungrouped", "")).ToArray());
+            if (!int.TryParse(group, NumberStyles.None, CultureInfo.InvariantCulture, out var index) || index >= groups.Length)
+                throw new InvalidDataException("Invalid mod group.");
+            installed = installed.Where(mod => string.Equals(mod.Group, groups[index], StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (installed.Count == 0) return new("idle", "No installed packages match.");
+            selected = await Ask("mod-matches", "Matching mod packages", ct,
+                installed.Select(mod => ModChoice(mod) with { IsOn = null }).ToArray());
+        }
+        var mod = installed.SingleOrDefault(item => item.Key == selected)
+            ?? throw new InvalidDataException("The selected mod is unavailable.");
+        var action = await Ask("mod-action", mod.DisplayLabel, ct,
+            [new("toggle", mod.Enabled ? "Disable package" : "Enable package", "Apply to the selected profile's mod directory"),
+             new("modules", "Modules and dependencies", "Review versions and module status"),
+             new("group", "Set group", mod.Group ?? "Ungrouped"),
+             new("note", "Set note", mod.Note ?? "Use the package name"),
+             new("remove", "Remove package", "Delete the files installed with this package")]);
+        ct.ThrowIfCancellationRequested();
+        if (action == "modules") return await BrowseModModulesAsync(library, mod, ct);
+        if (action is "group" or "note")
+        {
+            var group = action == "group";
+            var value = (await Ask(group ? "mod-group-name" : "mod-note",
+                group ? "Enter a group name. Leave blank to ungroup." : "Enter a display note. Leave blank to use the package name.", ct)).Trim();
+            if (value.Length > (group ? 64 : 96) || value.Any(char.IsControl)) return new("error", "Enter a shorter name without control characters.");
+            ct.ThrowIfCancellationRequested();
+            var updated = library.SetPresentation(mod.Key, group ? value : mod.Group, group ? mod.Note : value);
+            return new("idle", $"Updated {updated.DisplayLabel}.");
+        }
+        if (action == "toggle")
+        {
+            library.SetEnabled(selected, !mod.Enabled);
+            return new("idle", mod.Enabled ? "Mod package disabled." : "Mod package enabled.");
+        }
+        if (action != "remove") throw new InvalidDataException("Invalid mod action.");
+        var confirmation = await Ask("remove-mod", "Remove this mod package?", ct,
+            [new("keep", "Keep package", "Return to the launcher"), new("remove", "Remove package", mod.Label)]);
+        if (confirmation != "remove") return new("idle", "Mod package kept.");
+        ct.ThrowIfCancellationRequested();
+        library.Remove(selected);
+        return new("idle", "Mod package removed.");
+    }
 
     static Choice ModChoice(InstalledMod mod)
     {
         var detail = $"{(mod.Enabled ? "Enabled" : "Disabled")} · {string.Join(", ", mod.ModuleIds)}";
         if (mod.Group is not null) detail += $" · {mod.Group}";
         if (mod.Note is not null) detail = $"{mod.Label}\n{detail}";
-        return new(mod.Key, mod.DisplayLabel, detail);
+        return new(mod.Key, mod.DisplayLabel, detail, IsOn: mod.Enabled);
     }
 
     static async Task<State> BrowseModPresetsAsync(ModLibrary library, CancellationToken ct)
@@ -929,34 +956,48 @@ public static class Entry
 
     static async Task<State> BrowseModModulesAsync(ModLibrary library, InstalledMod package, CancellationToken ct)
     {
-        var modules = library.Modules(package.Key);
-        if (modules.Count == 0) return new("idle", "Reimport this package to make module controls available.");
-        var installed = library.EnabledModuleIds();
-        var choices = modules.Select(item =>
+        while (true)
         {
-            var module = item.Module;
-            var status = item.Enabled is null ? "Manifest unavailable" : item.Enabled == true ? "Enabled" : "Disabled";
-            var missing = module.Dependencies.Count(dependency => !installed.Contains(dependency));
-            if (missing != 0) status += $" · {missing} missing dependencies";
-            return new Choice(module.Id, module.Id, string.Join(" · ", new[] { status, module.Version, module.Author }.Where(value => value.Length != 0)));
-        }).ToArray();
-        var selected = await Ask("mod-modules", package.Label, ct, choices);
-        var selectedModule = modules.SingleOrDefault(item => item.Module.Id == selected)
-            ?? throw new InvalidDataException("The selected mod module is unavailable.");
-        var info = selectedModule.Module;
-        var lines = new List<string>();
-        if (!string.IsNullOrEmpty(info.MinimumGameVersion)) lines.Add($"Minimum game version {info.MinimumGameVersion}");
-        var dependencies = info.Dependencies.Select(dependency => installed.Contains(dependency) ? dependency : $"{dependency} (missing or disabled)");
-        if (info.Dependencies.Length != 0) lines.Add(string.Join(", ", dependencies));
-        if (selectedModule.Enabled is null) return new("error", "This mod module needs its original manifest. Reimport the package.");
-        var action = await Ask("mod-module-toggle", info.Id, ct,
-            [new("keep", "Keep current setting", "Return to the launcher"),
-             new("toggle", selectedModule.Enabled == true ? "Disable module" : "Enable module",
-                 lines.Count == 0 ? "Applies the next time the game starts" : string.Join("\n", lines))]);
-        if (action != "toggle") return new("idle", "Module settings kept.");
-        ct.ThrowIfCancellationRequested();
-        library.SetModuleEnabled(package.Key, selected, selectedModule.Enabled == false);
-        return new("idle", selectedModule.Enabled == true ? "Mod module disabled." : "Mod module enabled.");
+            var modules = library.Modules(package.Key);
+            if (modules.Count == 0) return new("idle", "Reimport this package to make module controls available.");
+            var installed = library.EnabledModuleIds();
+            var choices = modules.Select(item =>
+            {
+                var module = item.Module;
+                var status = item.Enabled is null ? "Manifest unavailable" : item.Enabled == true ? "Enabled" : "Disabled";
+                var missing = module.Dependencies.Count(dependency => !installed.Contains(dependency));
+                if (missing != 0) status += $" · {missing} missing dependencies";
+                return new Choice(module.Id, module.Id,
+                    string.Join(" · ", new[] { status, module.Version, module.Author }.Where(value => value.Length != 0)), IsOn: item.Enabled);
+            }).ToArray();
+            var selected = await Ask("mod-modules", package.Label, ct,
+                [.. choices, new("back-to-mods", "Back to installed mods", "")]);
+            if (selected == "back-to-mods") return new("idle", "Changes apply the next time the game starts.");
+            if (TryModSwitch(selected, out var moduleId, out var enabled))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!modules.Any(item => item.Module.Id == moduleId && item.Enabled is not null))
+                    throw new InvalidDataException("The selected module has no available manifest.");
+                library.SetModuleEnabled(package.Key, moduleId, enabled);
+                continue;
+            }
+            var selectedModule = modules.SingleOrDefault(item => item.Module.Id == selected)
+                ?? throw new InvalidDataException("The selected mod module is unavailable.");
+            var info = selectedModule.Module;
+            var lines = new List<string>();
+            if (!string.IsNullOrEmpty(info.MinimumGameVersion)) lines.Add($"Minimum game version {info.MinimumGameVersion}");
+            var dependencies = info.Dependencies.Select(dependency => installed.Contains(dependency) ? dependency : $"{dependency} (missing or disabled)");
+            if (info.Dependencies.Length != 0) lines.Add(string.Join(", ", dependencies));
+            if (selectedModule.Enabled is null) return new("error", "This mod module needs its original manifest. Reimport the package.");
+            var action = await Ask("mod-module-toggle", info.Id, ct,
+                [new("keep", "Keep current setting", "Return to the launcher"),
+                 new("toggle", selectedModule.Enabled == true ? "Disable module" : "Enable module",
+                     lines.Count == 0 ? "Applies the next time the game starts" : string.Join("\n", lines))]);
+            if (action != "toggle") return new("idle", "Module settings kept.");
+            ct.ThrowIfCancellationRequested();
+            library.SetModuleEnabled(package.Key, selected, selectedModule.Enabled == false);
+            return new("idle", selectedModule.Enabled == true ? "Mod module disabled." : "Mod module enabled.");
+        }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
@@ -1438,18 +1479,22 @@ public static class Entry
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Prepare() => Start("Launch preparation", new("verify", "Verifying installation…"),
-        PrepareLaunchAsync) ? 0 : -1;
+        (payloads, ct) => PrepareLaunchAsync(payloads, ct, safeMode: false)) ? 0 : -1;
 
-    static async Task<State> PrepareLaunchAsync(PayloadStore payloads, CancellationToken ct)
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int PrepareSafe() => Start("Safe launch preparation", new("verify", "Preparing launch without mods…"),
+        (payloads, ct) => PrepareLaunchAsync(payloads, ct, safeMode: true)) ? 0 : -1;
+
+    static async Task<State> PrepareLaunchAsync(PayloadStore payloads, CancellationToken ct, bool safeMode)
     {
         if (NativeExtensionsAvailable() != 1) return new("error", "Play requires an extension-enabled launcher build.");
         if (activeProfile is null) return new("error", "Select a launch profile before starting the game.");
         var plan = LaunchPlan.Prepare(payloads, documents, ct, activeProfile.PayloadId);
         var paths = profiles!.EnsureDirectories(activeProfile);
         var modLibrary = new ModLibrary(paths.ModsDirectory);
-        var mods = modLibrary.RuntimeDirectory();
+        var mods = modLibrary.RuntimeDirectory(skipInstalled: safeMode);
         launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
-        launchHasEnabledMods = modLibrary.EnabledModuleIds().Count != 0;
+        launchHasEnabledMods = !launchProfilePaths.ModsPaused && modLibrary.EnabledModuleIds().Count != 0;
         Publish(new("verify", "Checking game runtime compatibility…"));
         if (Launcher.Adapters.GameCompatibilityAudit.FirstIssue(plan.GameAssembly, activeProfile.IsolateSaves,
             activeProfile.IsolateMods || launchProfilePaths.ModsPaused) is { } issue)
@@ -1473,6 +1518,8 @@ public static class Entry
             return new("error", "The selected game build uses a Harmony runtime that needs an iOS adapter.");
         }
         launchOptions = OptionsStore(payloads).Load();
+        launchSafeMode = safeMode;
+        if (safeMode) launchOptions = new(RenderWarmup: false);
         GameWebDavSync? cloud = null;
         if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay or
             WebDavAutomationMode.SyncInBackground } webDav)
@@ -1512,6 +1559,8 @@ public static class Entry
         gameWebDav = cloud;
         loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
         releaseInfo = Path.Combine(Path.GetDirectoryName(plan.Pack)!, "release_info.json");
+        HostDiagnostics.Stage($"launch prepared: mods {(launchProfilePaths.ModsPaused ? "paused" : "normal")}, " +
+            $"preload {(launchOptions.RenderWarmup ? "enabled" : "off")}");
         return new("ready", "Game verified. Starting Godot…");
     }
 
@@ -1571,13 +1620,14 @@ public static class Entry
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException(), launchHasEnabledMods);
             GameRenderWarmup.CatalogDirectory = adapterRoot;
-            GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!);
+            if (!launchSafeMode) GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!);
             HostDiagnostics.Stage("game compatibility hooks installed");
             return 0;
         }
         catch (Exception error)
         {
-            HostDiagnostics.Error("game compatibility startup", error);
+            HostDiagnostics.Error("game compatibility startup",
+                error is TargetInvocationException { InnerException: { } cause } ? cause : error);
             return -1;
         }
     }

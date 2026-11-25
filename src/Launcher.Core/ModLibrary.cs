@@ -103,11 +103,11 @@ public sealed class ModLibrary(string activeDirectory)
         marker.Flush(flushToDisk: true);
     }
 
-    public string RuntimeDirectory()
+    public string RuntimeDirectory(bool skipInstalled = false)
     {
         using var operation = Lock();
         Recover();
-        if (!LoadingPaused) return active;
+        if (!skipInstalled && !LoadingPaused) return active;
         var empty = Payload.SafePath(Parent, ".empty-runtime-mods");
         Directory.CreateDirectory(empty);
         if (Directory.EnumerateFileSystemEntries(empty).Any())

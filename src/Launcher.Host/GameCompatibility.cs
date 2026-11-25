@@ -18,6 +18,8 @@ internal static class GameCompatibility
     static MethodInfo? modDirectoryCheck;
     static Type? modSettingsType;
     static bool enableLauncherMods;
+    static GameLaunchOptions? pendingLaunchOptions;
+    static Assembly? pendingGame;
     public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release, bool hasEnabledMods)
     {
         profilePaths=paths;releaseInfo=release;
@@ -32,7 +34,6 @@ internal static class GameCompatibility
         Optional(game,"MegaCrit.Sts2.Core.Debug.OsDebugInfo","LogSystemInfo",typeof(Task),nameof(Complete));
         Optional(game,"MegaCrit.Sts2.Core.Debug.SentryService","Initialize",typeof(void),nameof(Skip));
         Optional(game,"MegaCrit.Sts2.Core.Saves.PrefsSave","get_UploadData",typeof(bool),nameof(False));
-        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(game);
         if (profile.IsolateSaves) PatchIsolatedSaves(game);
         enableLauncherMods = hasEnabledMods && !paths.ModsPaused;
         var mods=game.GetType("MegaCrit.Sts2.Core.Modding.ModManager");
@@ -89,22 +90,45 @@ internal static class GameCompatibility
 
     public static void ApplyLaunchOptions(GameLaunchOptions options, Assembly game)
     {
+        if (!OperatingSystem.IsIOS() && !options.RenderWarmup && options.FrameLimit is null && options.TouchAsMouse is null)
+            return;
+        try
+        {
+            var menu = game.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu");
+            var ready = menu?.GetMethod("_Ready", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
+            if (ready?.ReturnType != typeof(void))
+            {
+                HostDiagnostics.Stage("main menu launch options unavailable for this game version");
+                return;
+            }
+            // Godot registers the C# object-binding callbacks after the managed
+            // entry point returns. Singleton calls such as DisplayServer.HasFeature
+            // must wait until a scene is active.
+            Patch(ready, typeof(GameCompatibility).GetMethod(nameof(MainMenuReady), Flags)!, "postfix");
+            pendingGame = game;
+            pendingLaunchOptions = options;
+            HostDiagnostics.Stage("main menu launch options hook installed");
+        }
+        catch (Exception error) { HostDiagnostics.Error("install main menu launch options", error); }
+    }
+
+    static void MainMenuReady(object __instance)
+    {
+        if (pendingLaunchOptions is not { } options || pendingGame is not { } game) return;
+        pendingLaunchOptions = null;
+        pendingGame = null;
+        HostDiagnostics.Stage("applying launch options after the game menu opened");
+        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(game);
+        ApplyGodotOptions(options);
         if (options.RenderWarmup)
         {
-            try
-            {
-                var menu = game.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu");
-                var ready = menu?.GetMethod("_Ready", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
-                if (ready?.ReturnType == typeof(void))
-                {
-                    GameRenderWarmup.Extended = options.ExtendedWarmup;
-                    Patch(ready, typeof(GameRenderWarmup).GetMethod(nameof(GameRenderWarmup.MainMenuReady), Flags)!, "postfix");
-                    HostDiagnostics.Stage("main menu preload hook installed");
-                }
-                else HostDiagnostics.Stage("startup preload unavailable for this game version");
-            }
-            catch (Exception error) { HostDiagnostics.Error("install startup preload", error); }
+            GameRenderWarmup.Extended = options.ExtendedWarmup;
+            GameRenderWarmup.MainMenuReady(__instance);
         }
+    }
+
+    static void ApplyGodotOptions(GameLaunchOptions options)
+    {
         if (options.FrameLimit is null && options.TouchAsMouse is null) return;
         var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");
         if (godot is null)
@@ -183,6 +207,7 @@ internal static class GameCompatibility
     }
     static void Patch(MethodInfo original,MethodInfo hook,string kind="prefix")
     {
+        HostDiagnostics.Stage($"install compatibility hook {original.DeclaringType?.Name}.{original.Name}");
         var hm=Activator.CreateInstance(harmonyMethod!,hook);
         var parameters=patch!.GetParameters();
         var args=new object?[parameters.Length];args[0]=original;

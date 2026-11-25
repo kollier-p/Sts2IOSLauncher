@@ -2,12 +2,25 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <libkern/OSCacheControl.h>
 #include "mono/MonoJitMemory.h"
 
 extern "C" int monovm_initialize(int, const char **, const char **);
 extern "C" int monovm_create_delegate(const char *, const char *, const char *, void **);
 extern "C" int sts2_probe_jit(void);
+
+static void traceStartup(const char *stage, int status = 0) {
+    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *path = [documents stringByAppendingPathComponent:@"LauncherLogs/startup.log"];
+    if (!path) return;
+    int log = open(path.fileSystemRepresentation, O_WRONLY | O_APPEND | O_CREAT, 0600);
+    if (log < 0) return;
+    dprintf(log, "%s (%d)\n", stage, status);
+    close(log);
+}
 
 // Mono configures the loader here and starts the runtime on the first delegate request.
 // Its CoreCLR compatibility API never assigns the host handle or domain ID.
@@ -41,13 +54,24 @@ extern "C" __attribute__((visibility("default"))) int sts2_initialize_game_runti
 }
 
 extern "C" __attribute__((visibility("default"))) bool godotsharp_game_main_init(void *godot, void *callbacks, void *interop, int size) {
+    traceStartup("Godot entered the C# runtime", runtimeConfigured ? 0 : -1);
     if (!runtimeConfigured) return false;
     bool (*entry)(void *, void *, void *, int) = nullptr;
     int result = monovm_create_delegate("sts2", "GodotPlugins.Game.Main", "InitializeFromGameProject", (void **)&entry);
-    if(result != 0 || !entry || !entry(godot ?: dlopen(nullptr, RTLD_NOW), callbacks, interop, size))return false;
-    int (*hooks)()=nullptr;
-    result=monovm_create_delegate("Launcher.Host","Launcher.Host.Entry","StartGameHooks",(void**)&hooks);
-    return result==0 && hooks && hooks()==0;
+    traceStartup("Resolved the game assembly entry point", result != 0 ? result : entry ? 0 : -1);
+    if (result != 0 || !entry) return false;
+    if (!entry(godot ?: dlopen(nullptr, RTLD_NOW), callbacks, interop, size)) {
+        traceStartup("Game assembly initialization failed", -1);
+        return false;
+    }
+    traceStartup("Game assembly initialized");
+    int (*hooks)() = nullptr;
+    result = monovm_create_delegate("Launcher.Host", "Launcher.Host.Entry", "StartGameHooks", (void **)&hooks);
+    traceStartup("Resolved launcher compatibility hooks", result != 0 ? result : hooks ? 0 : -1);
+    if (result != 0 || !hooks) return false;
+    result = hooks();
+    traceStartup("Launcher compatibility hooks returned", result);
+    return result == 0;
 }
 
 extern "C" __attribute__((visibility("default"))) int sts2_host_delegate(const char *method,void **entry) {

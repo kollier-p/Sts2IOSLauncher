@@ -16,6 +16,8 @@ The same save conflict checks apply to manual Steam Cloud sync. Downloads show f
 
 **Tools → Game launch settings → Startup asset preload** defaults to **Extended**. Its loading screen opens once the main menu is ready, then Godot draws representative textures, animation frames, and particles from the installed pack using offscreen native nodes. Effects are read from packed scene data without instantiating the scenes. Extended ends early if memory headroom falls or its 60-second budget is exceeded. An interrupted Extended pass sends the next launch of that installation through **Standard**, which uses the smaller asset set. Choose **Extended** again in launch settings to retry, or choose **Off** to use normal game startup. Each completed pass stores an asset list for that installation. Later launches reuse the list and still perform the render work. The launcher log reports the counts, duration, and any early-stop reason.
 
+**Play → Launch without mods or preload** runs the selected installation with an empty mod directory and the game’s own launch settings for that session. **Tools → View logs → Startup** records the handoff from Godot to the game assembly and launcher compatibility hooks. The **Launcher** log identifies each hook as it is installed.
+
 ## Native dependencies
 
 The launch copy of the PCK receives managed script placeholders and descriptors for the bundled FMOD and Spine frameworks. Extension-inclusive builds require the applicable licenses. Touch, controller, rendering and audio behavior must be verified on the target iPad.

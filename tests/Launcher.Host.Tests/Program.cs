@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text.Json;
 using Launcher.Adapters;
+using Launcher.Core;
 using Launcher.Host;
 using Launcher.Steam;
 using Mono.Cecil;
@@ -29,11 +30,13 @@ unsafe
     delegate* unmanaged[Cdecl]<int> gameSyncActive = &Entry.GameBackgroundSyncActive;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
+    delegate* unmanaged[Cdecl]<int> prepareSafe = &Entry.PrepareSafe;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
     delegate* unmanaged[Cdecl]<int> signIn = &Entry.SignInSteam;
     delegate* unmanaged[Cdecl]<int> startHooks = &Entry.StartGameHooks;
 
     Check(prepare() == -1, "An uninitialized host rejects launch");
+    Check(prepareSafe() == -1, "An uninitialized host rejects a safe launch");
     Check(cancel() == 0, "Cancel is safe while idle");
     Check(reply(0, 1) == -1, "A reply needs a live Steam prompt");
     Check(import(0) == -2, "Import rejects an invalid archive path");
@@ -93,9 +96,40 @@ unsafe
         void Choose(JsonElement prompt, string value)
         {
             var input = Marshal.StringToCoTaskMemUTF8(value);
-            try { Check(reply(input, prompt.GetProperty("PromptId").GetInt64()) == 0, "Workshop accepts the current prompt reply"); }
+            try { Check(reply(input, prompt.GetProperty("PromptId").GetInt64()) == 0, "The host accepts the current prompt reply"); }
             finally { Marshal.FreeCoTaskMem(input); }
         }
+        var library = new ModLibrary(Path.Combine(temp.FullName, "documents", "mods"));
+        using var mod = library.PrepareDownloadAsync("Fixture mod", (stage, _) =>
+        {
+            File.WriteAllText(Path.Combine(stage, "mod_manifest.json"), """{"id":"FixtureMod","version":"1.0"}""");
+            File.WriteAllBytes(Path.Combine(stage, "FixtureMod.pck"), "GDPC"u8.ToArray());
+            return Task.CompletedTask;
+        }, CancellationToken.None).GetAwaiter().GetResult();
+        var package = library.Install(mod, replace: false, CancellationToken.None);
+
+        JsonElement ModChoice(JsonElement prompt, string key) => prompt.GetProperty("Choices").EnumerateArray()
+            .Single(item => item.GetProperty("Value").GetString() == key);
+        Check(mods() == 0, "The installed mods pane opens through the native bridge");
+        var installedMods = WaitFor("Prompt", "mod");
+        Check(ModChoice(installedMods, package.Key).GetProperty("IsOn").GetBoolean(), "The package switch shows the installed state");
+        Choose(installedMods, $"disable:{package.Key}");
+        installedMods = WaitFor("Message", $"{package.DisplayLabel} disabled.");
+        Check(!ModChoice(installedMods, package.Key).GetProperty("IsOn").GetBoolean() && !library.List().Single().Enabled,
+            "Turning the package switch off refreshes the open list and persists the change");
+        Choose(installedMods, $"enable:{package.Key}");
+        installedMods = WaitFor("Message", $"{package.DisplayLabel} enabled.");
+        Choose(installedMods, package.Key);
+        Choose(WaitFor("Prompt", "mod-action"), "modules");
+        var modules = WaitFor("Prompt", "mod-modules");
+        Choose(modules, "disable:FixtureMod");
+        for (int attempt = 0; library.Modules(package.Key).Single().Enabled != false && attempt < 200; attempt++)
+            Thread.Sleep(10);
+        Check(library.Modules(package.Key).Single().Enabled == false && library.List().Single().Enabled,
+            "Turning a module off leaves the package enabled");
+        Check(cancel() == 0, "Closing the mods pane cancels the outstanding prompt");
+        WaitFor("Stage", "idle");
+
         Check(workshop() == 0, "Workshop opens through the native bridge");
         var range = WaitFor("Prompt", "workshop-range");
         Check(range.GetProperty("WorkshopSections").GetArrayLength() == 8 &&

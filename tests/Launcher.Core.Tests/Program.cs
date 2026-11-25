@@ -428,6 +428,8 @@ try
         "Pausing all mods switches the runtime to an empty directory while preserving package settings");
     mods.SetLoadingPaused(false);
     Assert(mods.RuntimeDirectory() == modsRoot, "Resuming mods restores the selected install directory");
+    Assert(mods.RuntimeDirectory(skipInstalled: true) == pausedRoot && !mods.LoadingPaused && mods.List().Single().Enabled &&
+        mods.RuntimeDirectory() == modsRoot, "A safe launch uses the empty directory without changing the profile’s mod settings");
     mods.SetModuleEnabled(installedMod.Key, "TestMod", false);
     Assert(mods.Modules(installedMod.Key).Single() is { Enabled: false, Module.Dependencies: ["FrameworkMod"] } &&
         !mods.EnabledModuleIds().Contains("TestMod"), "Module controls retain dependencies and disable only the selected manifest");
