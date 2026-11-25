@@ -349,6 +349,17 @@ try
         Assert(preparedWorkshop.ModuleIds.SequenceEqual(new[] { "WorkshopMod" }) && preparedWorkshop.Label == "Workshop listing",
             "A SteamPipe download containing a single ZIP uses the same mod pipeline");
     }
+    var origin = new WorkshopOrigin(851, "public-beta", 100, 50);
+    using (var originalWorkshop = mods.PrepareArchiveAsync(workshopZip, CancellationToken.None, workshop: origin).GetAwaiter().GetResult())
+    {
+        var initial = mods.Install(originalWorkshop, false, CancellationToken.None);
+        using var updatedWorkshop = mods.PrepareArchiveAsync(CreateModZip("New Workshop asset", "NewWorkshopMod", "updated"),
+            CancellationToken.None, workshop: origin with { Manifest = 200, Updated = 60 }).GetAwaiter().GetResult();
+        Assert(mods.Replacement(updatedWorkshop)?.Key == initial.Key, "An update can replace the same Workshop item and branch when its modules change");
+        var updated = mods.Install(updatedWorkshop, true, CancellationToken.None);
+        Assert(updated.Key == initial.Key && mods.List().Single().Workshop?.Manifest == 200, "Workshop origin survives in the installed mod receipt");
+        mods.Remove(updated.Key);
+    }
     using var nexusHandler = new NexusFixture();
     using var nexusHttp = new HttpClient(nexusHandler);
     var nexus = new NexusMods(nexusHttp, "fixture");

@@ -94,7 +94,7 @@ public sealed class NexusMods(HttpClient http, string apiKey)
         using var document = await Get(url, ct);
         var download = document.RootElement.EnumerateArray().Select(link => Text(link, "URI"))
             .Select(Transfer).FirstOrDefault(link => link is not null) ?? throw new IOException("Nexus returned no HTTPS download mirror.");
-        await ModDownloads.FetchAsync(http, download, output, null, ct);
+        await ModDownloads.FetchAsync(http, download, output, null, address => Transfer(address.AbsoluteUri) is not null, ct);
     }
 
     async Task<JsonDocument> Get(string path, CancellationToken ct)

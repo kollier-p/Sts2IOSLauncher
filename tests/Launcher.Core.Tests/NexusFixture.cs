@@ -10,6 +10,13 @@ internal sealed class NexusFixture : HttpMessageHandler
         if (uri.Host == "cdn.nexusmods.com")
         {
             if (request.Headers.Contains("apikey")) throw new InvalidOperationException("The API key reached the download mirror.");
+            var redirect = new HttpResponseMessage(HttpStatusCode.TemporaryRedirect);
+            redirect.Headers.Location = new Uri("https://files.nexus-cdn.com/mods/fixture.zip");
+            return Task.FromResult(redirect);
+        }
+        if (uri.Host == "files.nexus-cdn.com")
+        {
+            if (request.Headers.Contains("apikey")) throw new InvalidOperationException("The API key reached the redirected download mirror.");
             Downloaded = true;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
         }

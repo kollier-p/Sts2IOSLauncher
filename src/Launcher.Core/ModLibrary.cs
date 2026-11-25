@@ -4,7 +4,8 @@ using System.Text.Json;
 
 namespace Launcher.Core;
 
-public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled);
+public sealed record WorkshopOrigin(ulong ItemId, string Branch, ulong? Manifest, uint Updated);
+public sealed record InstalledMod(string Key, string Label, string[] ModuleIds, bool Enabled, WorkshopOrigin? Workshop = null);
 
 public sealed class ModLibrary(string activeDirectory)
 {
@@ -15,16 +16,18 @@ public sealed class ModLibrary(string activeDirectory)
 
     public sealed class PreparedImport : IDisposable
     {
-        internal PreparedImport(string directory, string label, string[] modules)
+        internal PreparedImport(string directory, string label, string[] modules, WorkshopOrigin? workshop)
         {
             DirectoryPath = directory;
             Label = label;
             ModuleIds = Array.AsReadOnly(modules);
+            Workshop = workshop;
         }
 
         internal string DirectoryPath { get; }
         public string Label { get; }
         public IReadOnlyList<string> ModuleIds { get; }
+        public WorkshopOrigin? Workshop { get; }
 
         public void Dispose()
         {
@@ -39,18 +42,20 @@ public sealed class ModLibrary(string activeDirectory)
         return ReadInstalled();
     }
 
-    public Task<PreparedImport> PrepareArchiveAsync(string source, CancellationToken ct, string? displayName = null)
+    public Task<PreparedImport> PrepareArchiveAsync(string source, CancellationToken ct, string? displayName = null,
+        WorkshopOrigin? workshop = null)
     {
         ct.ThrowIfCancellationRequested();
         var format = ArchiveFormats.Detect(source) ?? throw new NotSupportedException("Unsupported mod archive format.");
         return PrepareAsync(displayName ?? ArchiveFormats.DisplayName(source), ct,
-            (stage, token) => ExtractAsync(source, format, stage, token));
+            (stage, token) => ExtractAsync(source, format, stage, token), workshop);
     }
 
     public Task<PreparedImport> PrepareDownloadAsync(string displayName, Func<string, CancellationToken, Task> download,
-        CancellationToken ct) => PrepareAsync(displayName, ct, download);
+        CancellationToken ct, WorkshopOrigin? workshop = null) => PrepareAsync(displayName, ct, download, workshop);
 
-    async Task<PreparedImport> PrepareAsync(string displayName, CancellationToken ct, Func<string, CancellationToken, Task> populate)
+    async Task<PreparedImport> PrepareAsync(string displayName, CancellationToken ct, Func<string, CancellationToken, Task> populate,
+        WorkshopOrigin? workshop)
     {
         var stage = Payload.SafePath(Parent, ".mod-stage-" + Guid.NewGuid().ToString("N"));
         try
@@ -74,7 +79,7 @@ public sealed class ModLibrary(string activeDirectory)
             }
             var modules = PrepareModules(stage, ct);
             var label = new string(displayName.Where(c => !char.IsControl(c)).Take(128).ToArray()).Trim();
-            return new PreparedImport(stage, label.Length == 0 ? modules[0] : label, modules);
+            return new PreparedImport(stage, label.Length == 0 ? modules[0] : label, modules, workshop);
         }
         catch
         {
@@ -139,7 +144,7 @@ public sealed class ModLibrary(string activeDirectory)
         if (previous is not null && !replace) throw new InvalidOperationException("Confirm replacement of the installed mod.");
         var key = previous?.Key ?? Guid.NewGuid().ToString("N");
         var enabled = previous?.Enabled ?? true;
-        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled);
+        var result = new InstalledMod(key, import.Label, import.ModuleIds.ToArray(), enabled, import.Workshop);
         var destination = Location(key, enabled);
         WriteReceipt(import.DirectoryPath, result);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -190,7 +195,15 @@ public sealed class ModLibrary(string activeDirectory)
     static InstalledMod? Match(PreparedImport import, IReadOnlyList<InstalledMod> installed)
     {
         var incoming = new HashSet<string>(import.ModuleIds, StringComparer.OrdinalIgnoreCase);
+        var workshop = import.Workshop is { } origin ? installed.SingleOrDefault(mod => mod.Workshop is { } old &&
+            old.ItemId == origin.ItemId && old.Branch.Equals(origin.Branch, StringComparison.OrdinalIgnoreCase)) : null;
         var matches = installed.Where(mod => mod.ModuleIds.Any(incoming.Contains)).ToArray();
+        if (workshop is not null)
+        {
+            if (matches.Any(mod => mod.Key != workshop.Key))
+                throw new InvalidDataException("The Workshop update overlaps another installed package.");
+            return workshop;
+        }
         if (matches.Length == 0) return null;
         if (matches.Length != 1 || !incoming.SetEquals(matches[0].ModuleIds))
             throw new InvalidDataException("The archive overlaps multiple installed mod packages or changes their membership.");
@@ -214,7 +227,8 @@ public sealed class ModLibrary(string activeDirectory)
                 {
                     using var stream = File.OpenRead(receipt);
                     var mod = JsonSerializer.Deserialize<InstalledMod>(stream);
-                    if (mod?.Key == name && mod.ModuleIds is { Length: > 0 } && mod.ModuleIds.All(ValidModuleName))
+                    if (mod?.Key == name && mod.ModuleIds is { Length: > 0 } && mod.ModuleIds.All(ValidModuleName) &&
+                        (mod.Workshop is null || (mod.Workshop.ItemId != 0 && !string.IsNullOrWhiteSpace(mod.Workshop.Branch))))
                         result.Add(mod with { Enabled = enabled });
                 }
                 catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException) { }

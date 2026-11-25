@@ -208,11 +208,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.steamCloud=[self button:@"Steam Cloud saves" action:@selector(steamCloudPressed)];
     self.mods=[self button:@"Installed mods" action:@selector(modsPressed)];
     self.importMod=[self button:@"Import mod archive" action:@selector(importModPressed)];
-    self.workshop=[self button:@"Install a Workshop item" action:@selector(workshopPressed)];
-    UIButton *workshopWebsite=[self button:@"Browse Steam Workshop" action:@selector(workshopWebsitePressed)];
+    self.workshop=[self button:@"Steam Workshop" action:@selector(workshopPressed)];
+    UIButton *workshopWebsite=[self button:@"Open Workshop in browser" action:@selector(workshopWebsitePressed)];
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
     self.diagnostics=[self button:@"Launcher log" action:@selector(logPressed)];
     self.files=[self button:@"Launcher files" action:@selector(filesPressed)];
+    UIButton *about=[self button:@"About and updates" action:@selector(aboutPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
     UIButtonConfiguration *playStyle=UIButtonConfiguration.filledButtonConfiguration;
@@ -229,7 +230,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
     UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
-    UIStackView *toolsSection=[self section:@[self.files,self.diagnostics]];
+    UIStackView *toolsSection=[self section:@[self.files,self.diagnostics,about]];
     self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
     UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
@@ -402,6 +403,53 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     UIViewController *browser=launcherFileBrowser(documents);
     [self presentViewController:browser animated:YES completion:nil];
+}
+- (void)aboutPressed {
+    NSDictionary *info=NSBundle.mainBundle.infoDictionary;
+    NSString *version=info[@"CFBundleShortVersionString"]?:@"0";
+    NSString *commit=info[@"STS2GitRevision"]?:@"";
+    if(commit.length>12)commit=[commit substringToIndex:12];
+    NSString *message=commit.length?[NSString stringWithFormat:@"Version %@ · %@",version,commit]:[NSString stringWithFormat:@"Version %@",version];
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"STS2 Launcher" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Check for updates" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+        [self checkForUpdates:version];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Open source repository" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+        NSURL *url=[NSURL URLWithString:@"https://github.com/kollier-p/Sts2IOSLauncher"];
+        [self.application openURL:url options:@{} completionHandler:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)checkForUpdates:(NSString *)installed {
+    NSURL *url=[NSURL URLWithString:@"https://api.github.com/repos/kollier-p/Sts2IOSLauncher/releases/latest"];
+    NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:15];
+    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
+        NSInteger code=[response isKindOfClass:NSHTTPURLResponse.class]?((NSHTTPURLResponse *)response).statusCode:0;
+        NSDictionary *release=nil;
+        if(code==200 && data.length && data.length<1024*1024){
+            id value=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if([value isKindOfClass:NSDictionary.class])release=value;
+        }
+        NSString *tag=[release[@"tag_name"] isKindOfClass:NSString.class]?release[@"tag_name"]:@"";
+        NSString *version=[tag hasPrefix:@"v"]?[tag substringFromIndex:1]:tag;
+        BOOL valid=[version rangeOfString:@"^[0-9]+[.][0-9]+[.][0-9]+$" options:NSRegularExpressionSearch].location!=NSNotFound;
+        BOOL available=valid && [version compare:installed options:NSNumericSearch]==NSOrderedDescending;
+        NSURL *page=valid?[NSURL URLWithString:[@"https://github.com/kollier-p/Sts2IOSLauncher/releases/tag/" stringByAppendingString:tag]]:nil;
+        NSString *message=available?[NSString stringWithFormat:@"Version %@ is available.",version]:
+            valid?@"You have the latest published version.":
+            code==404?@"No stable launcher release is published.":@"The update check could not finish.";
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(self.presentedViewController || !self.view.window)return;
+            UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Launcher updates" message:message preferredStyle:UIAlertControllerStyleAlert];
+            if(available && page)[alert addAction:[UIAlertAction actionWithTitle:@"Open release" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+                [self.application openURL:page options:@{} completionHandler:nil];
+            }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    }] resume];
 }
 - (void)logPressed {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;

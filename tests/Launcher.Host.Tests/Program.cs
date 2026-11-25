@@ -89,6 +89,16 @@ Check(WorkshopManifest.ResolveBranch(workshopBranches, "public-beta")?.Id == 101
     WorkshopManifest.ResolveBranch(workshopBranches, "public")?.Id == 100 &&
     WorkshopManifest.ResolveBranch(workshopBranches, "unknown") is null,
     "Workshop author snapshots preserve branch bounds and do not mislabel the default manifest");
+const string workshopJson = """
+    {"queries":[{"queryKey":["workshop_browse",{"appid":2868840}],"state":{"data":{"eresult":1,"current_page":2,
+    "total_pages":5,"results":[{"consumer_appid":2868840,"publishedfileid":"18446744073709551615",
+    "title":"Fixture & tools","short_description":"A Steam Workshop fixture"},
+    {"consumer_appid":1,"publishedfileid":"2","title":"Another game"}]}}}]}
+    """;
+var workshopSsr = JsonSerializer.Serialize(new { renderContext = new { queryData = workshopJson } });
+var workshopPage = WorkshopFiles.ParsePage($"""<script id="valve-ssr-data" type="application/json">{workshopSsr}</script>""");
+Check(workshopPage.Index == 2 && workshopPage.Pages == 5 && workshopPage.Items.Single().Id == ulong.MaxValue &&
+    workshopPage.Items[0].Title == "Fixture & tools", "Workshop browsing parses and scopes Steam's published page data");
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 
