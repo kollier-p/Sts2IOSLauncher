@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Text.Json;
 using Launcher.Adapters;
 using Launcher.Host;
@@ -150,6 +151,44 @@ try
         "Isolated and paused mods require the scanner signature");
 }
 finally { Directory.Delete(compatibilityDirectory, recursive: true); }
+
+var steamKitDirectory = Directory.CreateTempSubdirectory("sts2-steamkit-").FullName;
+var steamKitContext = new AssemblyLoadContext("SteamKit iOS adapter test", isCollectible: true);
+try
+{
+    var original = typeof(SteamKit2.SteamClient).Assembly;
+    var patchedPath = Path.Combine(steamKitDirectory, "SteamKit2.dll");
+    Rewriter.Prepare("steamkit", original.Location, "", patchedPath);
+    using (var patched = AssemblyDefinition.ReadAssembly(patchedPath))
+    {
+        var constructor = patched.MainModule.GetType("SteamKit2.SteamClient").Methods
+            .Single(method => method.IsConstructor && method.Parameters.Count == 2);
+        Check(!constructor.Body.Instructions.Any(instruction => instruction.Operand is MethodReference method &&
+            method.DeclaringType.FullName == "System.Diagnostics.Process"), "SteamKit can construct its client on iOS");
+    }
+
+    using var stream = File.OpenRead(patchedPath);
+    var assembly = steamKitContext.LoadFromStream(stream);
+    Check(assembly.GetName().FullName == original.GetName().FullName, "The iOS adapter preserves SteamKit assembly identity");
+    var clientType = assembly.GetType("SteamKit2.SteamClient", throwOnError: true)!;
+    var client = Activator.CreateInstance(clientType);
+    var nextJob = clientType.GetMethod(nameof(SteamKit2.SteamClient.GetNextJobID))!;
+    var first = nextJob.Invoke(client, null)!;
+    var second = nextJob.Invoke(client, null)!;
+    var jobType = first.GetType();
+    var timestamp = jobType.GetProperty(nameof(SteamKit2.JobID.StartTime))!;
+    var sequence = jobType.GetProperty(nameof(SteamKit2.JobID.SequentialCount))!;
+    var firstTimestamp = (DateTime)timestamp.GetValue(first)!;
+    Check((firstTimestamp - DateTime.UtcNow).Duration() < TimeSpan.FromMinutes(1) &&
+          firstTimestamp == (DateTime)timestamp.GetValue(second)! &&
+          Convert.ToInt64(sequence.GetValue(second)) == Convert.ToInt64(sequence.GetValue(first)) + 1,
+          "The patched SteamKit generates distinct job IDs with a stable timestamp");
+}
+finally
+{
+    steamKitContext.Unload();
+    Directory.Delete(steamKitDirectory, recursive: true);
+}
 
 Console.WriteLine("Native launcher managed entry points passed without Steam credentials or game files.");
 

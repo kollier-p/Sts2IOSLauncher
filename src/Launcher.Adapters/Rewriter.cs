@@ -7,14 +7,13 @@ namespace Launcher.Adapters;
 public static class Rewriter {
 public static void Prepare(string mode,string inputPath,string supportPath,string outputPath) {
 string[] args=[mode,inputPath,supportPath,outputPath];
-if (args.Length != 4)
-    throw new ArgumentException("Usage: STS2JitPrepare <harmony|corelib> <input> <support.dll> <output>");
 if (Path.GetFullPath(args[1]) == Path.GetFullPath(args[3]))
     throw new ArgumentException("The original assembly must remain unchanged.");
 string expectedHash = args[0] switch
 {
     "harmony" => "ef1898322c9f5c86dc1b0758b272a9c440823b4a41ca9a0b82a3aa6b3d206387",
     "corelib" => "2c04207e84e2b4fff5407d1687e1c85e56db71ad540a6aead1baf00b4a691089",
+    "steamkit" => "0339e8490d46b0d121349d80d5c423abf4e0293b5ef1197f3b77c00cedf72785",
     _ => throw new ArgumentException("Unknown assembly adapter.")
 };
 using (var input = File.OpenRead(args[1]))
@@ -71,6 +70,10 @@ else if (args[0] == "harmony")
     Append(Instruction.Create(OpCodes.Ldloc, importer.Body.Variables.First(v => v.VariableType.FullName == "Mono.Cecil.MethodReference")));
     Append(Instruction.Create(OpCodes.Call, module.ImportReference(fix)));
 }
+else if (args[0] == "steamkit")
+{
+    ReplaceSteamKitJobTimestamp(module);
+}
 else throw new ArgumentException("Unknown assembly adapter.");
 
 string temporary = args[3] + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -83,4 +86,31 @@ finally { if (File.Exists(temporary)) File.Delete(temporary); }
 Console.WriteLine($"Prepared {args[0]} for the iOS JIT runtime.");
 
 }
+
+    static void ReplaceSteamKitJobTimestamp(ModuleDefinition module)
+    {
+        var client = module.GetType("SteamKit2.SteamClient");
+        var constructor = client.Methods.Single(method => method.IsConstructor && method.Parameters.Count == 2);
+        var timestamp = client.Fields.Single(field => field.Name == "processStartTime");
+        var body = constructor.Body;
+        var getProcess = body.Instructions.Single(instruction => instruction.Operand is MethodReference method &&
+            method.DeclaringType.FullName == "System.Diagnostics.Process" && method.Name == "GetCurrentProcess");
+        var afterProcess = body.ExceptionHandlers.Single().HandlerEnd;
+        var utcNow = new MethodReference("get_UtcNow", timestamp.FieldType, timestamp.FieldType);
+
+        // The original using block reads Process.StartTime, which throws on iOS.
+        // SteamKit only needs a timestamp that stays constant for the client's job IDs.
+        var il = body.GetILProcessor();
+        il.InsertBefore(getProcess, Instruction.Create(OpCodes.Ldarg_0));
+        il.InsertBefore(getProcess, Instruction.Create(OpCodes.Call, utcNow));
+        il.InsertBefore(getProcess, Instruction.Create(OpCodes.Stfld, timestamp));
+        body.ExceptionHandlers.Clear();
+        body.Variables.Clear();
+        for (var instruction = getProcess; instruction != afterProcess;)
+        {
+            var next = instruction.Next;
+            il.Remove(instruction);
+            instruction = next;
+        }
+    }
 }
