@@ -25,6 +25,9 @@ static Command beginDownload, beginImport, beginModImport, beginSnapshotImport;
 static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
     browseLaunchOptions, cancelOperation, prepareGame, forgetSession;
+static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
+static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
+static NSTimer *gameSyncTimer;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController<NSURLSessionTaskDelegate>
@@ -220,10 +223,32 @@ static BOOL delayedLaunch(id service,SEL selector,UIApplication *application,NSD
     [gate.window makeKeyAndVisible];
     return YES;
 }
+static void endGameSync(UIApplication *application, BOOL cancel) {
+    if(gameSyncTask==UIBackgroundTaskInvalid)return;
+    if(cancel)cancelGameBackgroundSync();
+    [gameSyncTimer invalidate];
+    gameSyncTimer=nil;
+    UIBackgroundTaskIdentifier task=gameSyncTask;
+    gameSyncTask=UIBackgroundTaskInvalid;
+    [application endBackgroundTask:task];
+}
+static void startGameSync(UIApplication *application) {
+    if(gameSyncTask!=UIBackgroundTaskInvalid || beginGameBackgroundSync()!=0)return;
+    gameSyncTask=[application beginBackgroundTaskWithName:@"Sync game saves" expirationHandler:^{
+        endGameSync(application,YES);
+    }];
+    if(gameSyncTask==UIBackgroundTaskInvalid){cancelGameBackgroundSync();return;}
+    gameSyncTimer=[NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer){
+        if(!gameBackgroundSyncActive())endGameSync(application,NO);
+    }];
+}
 static void forward(id service,SEL selector,UIApplication *application) {
     if(!started)return;
+    if(selector==@selector(applicationWillEnterForeground:) || selector==@selector(applicationWillTerminate:))
+        endGameSync(application,YES);
     auto original=(void(*)(id,SEL,UIApplication*))lifecycle[NSStringFromSelector(selector)].pointerValue;
     if(original)original(service,selector,application);
+    if(selector==@selector(applicationDidEnterBackground:))startGameSync(application);
 }
 @implementation LauncherGate
 + (void)load {
@@ -354,6 +379,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("BrowseMods",(void**)&browseMods)==0 && get("BeginModImport",(void**)&beginModImport)==0 &&
                get("BrowseWorkshop",(void**)&browseWorkshop)==0 && get("BrowseNexus",(void**)&browseNexus)==0 &&
                get("BrowseLaunchOptions",(void**)&browseLaunchOptions)==0 &&
+               get("BeginGameBackgroundSync",(void**)&beginGameBackgroundSync)==0 &&
+               get("GameBackgroundSyncActive",(void**)&gameBackgroundSyncActive)==0 &&
+               get("CancelGameBackgroundSync",(void**)&cancelGameBackgroundSync)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);

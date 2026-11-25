@@ -3,6 +3,19 @@ namespace Launcher.Core;
 // The caller owns the disposable destination and removes it on failure.
 public static class LaunchCopy
 {
+    public static void RemoveInterruptedCopies(string directory)
+    {
+        if (!Directory.Exists(directory)) return;
+        const string prefix = "StS2.pck.";
+        foreach (var temporary in Directory.EnumerateFiles(directory, prefix + "*.tmp"))
+        {
+            var filename = Path.GetFileName(temporary);
+            if (filename.Length == prefix.Length + 32 + 4 &&
+                Guid.TryParseExact(filename.AsSpan(prefix.Length, 32), "N", out _))
+                File.Delete(Payload.SafePath(directory, filename));
+        }
+    }
+
     public static void Copy(string source, string destination, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();

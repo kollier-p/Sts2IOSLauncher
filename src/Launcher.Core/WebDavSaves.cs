@@ -1,13 +1,15 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
 
 namespace Launcher.Core;
 
-public enum WebDavAutomationMode { Manual, PullBeforePlay, SyncBeforePlay }
+public enum WebDavAutomationMode { Manual, PullBeforePlay, SyncBeforePlay, SyncInBackground }
 
 public sealed record WebDavSettings(string Endpoint, string User, string Password, string Slot, bool IncludeSettings,
     WebDavAutomationMode Automation = WebDavAutomationMode.Manual)
@@ -37,7 +39,9 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
     readonly AuthenticationHeaderValue? credentials = settings.User.Length == 0 ? null : new("Basic",
         Convert.ToBase64String(Encoding.UTF8.GetBytes($"{settings.User}:{settings.Password}")));
 
-    sealed record SaveFile(string Relative, string File, string Hash, EntityTagHeaderValue? ETag = null, DateTimeOffset? Modified = null);
+    sealed record SaveFile(string Relative, string? File, string Hash, EntityTagHeaderValue? ETag = null,
+        DateTimeOffset? Modified = null, long? Length = null);
+    sealed record RemoteDigest(string ETag, string Hash, long Length);
 
     public async Task TestConnectionAsync(CancellationToken ct)
     {
@@ -51,12 +55,17 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
     {
         ct.ThrowIfCancellationRequested();
         localRoot = Path.GetFullPath(localRoot);
-        var history = new SaveSyncHistory(baselineRoot, $"{endpoint}\n{settings.User}\n{slot}\n{profileKey}");
+        var identity = $"{endpoint}\n{settings.User}\n{slot}\n{profileKey}";
+        var history = new SaveSyncHistory(baselineRoot, identity);
+        var cacheKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        var cachePath = Payload.SafePath(baselineRoot, cacheKey + ".webdav-etags");
+        var cache = ReadRemoteDigests(cachePath);
         var scratch = Directory.CreateTempSubdirectory("sts2-webdav-").FullName;
         try
         {
             var local = await ReadLocal(localRoot, ct);
-            var remote = await ReadRemote(scratch, ct);
+            var remote = await ReadRemote(scratch, cache, ct);
+            SaveRemoteDigests(cachePath, remote);
             var source = upload ? local : remote;
             var destination = upload ? remote : local;
             var changes = history.Changes(Hashes(source), Hashes(destination), overwriteConflicts)
@@ -71,11 +80,15 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
                     remote.TryGetValue(file.Relative, out var previous);
                     var path = $"{slot}/{previous?.Relative ?? file.Relative}";
                     await EnsureCollections(path[..path.LastIndexOf('/')], prepared, ct);
-                    using var content = new StreamContent(File.OpenRead(file.File));
+                    using var input = File.OpenRead(file.File!);
+                    if (Convert.ToHexString(await SHA256.HashDataAsync(input, ct)) != file.Hash)
+                        throw new IOException("A local save changed while preparing the upload.");
+                    input.Position = 0;
+                    using var content = new StreamContent(input);
                     using var request = Request(HttpMethod.Put, Location(path));
                     request.Content = content;
                     if (previous is null) request.Headers.IfNoneMatch.Add(EntityTagHeaderValue.Any);
-                    else if (previous.ETag is { IsWeak: false }) request.Headers.IfMatch.Add(previous.ETag);
+                    else if (Strong(previous.ETag)) request.Headers.IfMatch.Add(previous.ETag!);
                     else if (previous.Modified is not null) request.Headers.IfUnmodifiedSince = previous.Modified;
                     using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
                     response.EnsureSuccessStatusCode();
@@ -84,8 +97,14 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
             }
             else
             {
-                var files = changes.ToDictionary(file => local.TryGetValue(file.Relative, out var item) ? item.Relative : file.Relative,
-                    file => file.File, StringComparer.Ordinal);
+                var files = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var file in changes)
+                {
+                    var received = file.File is null
+                        ? await DownloadRemote(file.Relative, scratch, file.ETag, file.Modified, file.Length, ct) : file;
+                    if (received.Hash != file.Hash) throw new IOException("A remote WebDAV save changed while preparing the download.");
+                    files.Add(local.TryGetValue(file.Relative, out var item) ? item.Relative : file.Relative, received.File!);
+                }
                 new SaveSnapshots(localRoot, snapshotRoot).ApplyDownloadedFiles(files, ct);
                 foreach (var file in changes) history.Remember(file.Relative, file.Hash);
             }
@@ -103,7 +122,7 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
         return result;
     }
 
-    async Task<Dictionary<string, SaveFile>> ReadRemote(string scratch, CancellationToken ct)
+    async Task<Dictionary<string, SaveFile>> ReadRemote(string scratch, IReadOnlyDictionary<string, RemoteDigest> cache, CancellationToken ct)
     {
         var result = new Dictionary<string, SaveFile>(StringComparer.OrdinalIgnoreCase);
         var folders = new Stack<string>();
@@ -139,21 +158,85 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
                 if (collection && SaveFileRules.Visit(relative)) folders.Push(relative);
                 else if (!collection && SaveFileRules.Include(relative, settings.IncludeSettings))
                 {
-                    using var request = Request(HttpMethod.Get, Location($"{slot}/{relative}"));
-                    using var download = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-                    download.EnsureSuccessStatusCode();
-                    if (download.Content.Headers.ContentLength is > 0 and var length)
-                        PayloadStorage.EnsureCapacity(scratch, length);
-                    var file = Path.Combine(scratch, Guid.NewGuid().ToString("N"));
-                    await using (var output = File.Create(file))
-                        await download.Content.CopyToAsync(output, ct);
-                    result.Add(relative, new(relative, file, await Hash(file, ct),
-                        download.Headers.ETag, download.Content.Headers.LastModified));
+                    var properties = item.Elements(Dav + "propstat").Where(status =>
+                        ((string?)status.Element(Dav + "status"))?.Split(' ', StringSplitOptions.RemoveEmptyEntries) is [_, "200", ..])
+                        .SelectMany(status => status.Elements(Dav + "prop")).ToArray();
+                    string? Value(string property) => properties.Select(element => (string?)element.Element(Dav + property)).FirstOrDefault(value => value is not null);
+                    EntityTagHeaderValue.TryParse(Value("getetag"), out var etag);
+                    var length = long.TryParse(Value("getcontentlength"), NumberStyles.None, CultureInfo.InvariantCulture, out var size)
+                        ? (long?)size : null;
+                    var modified = DateTimeOffset.TryParse(Value("getlastmodified"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
+                        ? (DateTimeOffset?)date : null;
+                    var file = Strong(etag) && length is long fileSize && cache.TryGetValue(relative, out var known) && known is not null &&
+                        known.ETag == etag!.Tag && known.Length == fileSize
+                        ? new SaveFile(relative, null, known.Hash, etag, modified, length)
+                        : await DownloadRemote(relative, scratch, etag, modified, length, ct);
+                    result.Add(relative, file);
                 }
             }
         }
         return result;
     }
+
+    async Task<SaveFile> DownloadRemote(string relative, string scratch, EntityTagHeaderValue? etag,
+        DateTimeOffset? modified, long? expectedLength, CancellationToken ct)
+    {
+        using var request = Request(HttpMethod.Get, Location($"{slot}/{relative}"));
+        if (Strong(etag)) request.Headers.IfMatch.Add(etag!);
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+        if (Strong(etag) && response.Headers.ETag is { } receivedTag && !receivedTag.Equals(etag))
+            throw new IOException("A remote WebDAV save changed while downloading.");
+        var length = response.Content.Headers.ContentLength ?? expectedLength;
+        if (length is > 0) PayloadStorage.EnsureCapacity(scratch, length.Value);
+        var file = Path.Combine(scratch, Guid.NewGuid().ToString("N"));
+        await using (var output = File.Create(file))
+            await response.Content.CopyToAsync(output, ct);
+        var actual = new FileInfo(file).Length;
+        if ((length is not null && length.Value != actual) || (expectedLength is not null && expectedLength.Value != actual))
+            throw new InvalidDataException("The WebDAV save does not match its advertised length.");
+        return new(relative, file, await Hash(file, ct), response.Headers.ETag ?? etag,
+            response.Content.Headers.LastModified ?? modified, actual);
+    }
+
+    static Dictionary<string, RemoteDigest> ReadRemoteDigests(string path)
+    {
+        if (File.Exists(path))
+        {
+            try
+            {
+                using var stream = File.OpenRead(path);
+                if (JsonSerializer.Deserialize<Dictionary<string, RemoteDigest>>(stream) is { } items)
+                    return new(items, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { }
+        }
+        return new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    static void SaveRemoteDigests(string path, Dictionary<string, SaveFile> remote)
+    {
+        var items = remote.Values.Where(file => Strong(file.ETag) && file.Length.HasValue)
+            .ToDictionary(file => file.Relative, file => new RemoteDigest(file.ETag!.Tag, file.Hash, file.Length!.Value));
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(stream, items);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    static bool Strong(EntityTagHeaderValue? etag) => etag is { IsWeak: false, Tag: not "*" };
 
     async Task EnsureCollections(string path, HashSet<string> prepared, CancellationToken ct)
     {
@@ -173,7 +256,9 @@ public sealed class WebDavSaves(HttpClient http, WebDavSettings settings)
     {
         using var request = Request(PropFind, uri);
         request.Headers.Add("Depth", "1");
-        request.Content = new StringContent("<propfind xmlns=\"DAV:\"><prop><resourcetype/></prop></propfind>", Encoding.UTF8, "application/xml");
+        request.Content = new StringContent(
+            "<propfind xmlns=\"DAV:\"><prop><resourcetype/><getetag/><getcontentlength/><getlastmodified/></prop></propfind>",
+            Encoding.UTF8, "application/xml");
         return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 

@@ -35,7 +35,13 @@ public static class Payload
         {
             var file = SafePath(root, path);
             if (!File.Exists(file) || new FileInfo(file).Length == 0) throw new InvalidDataException($"Missing or empty {path}");
-            if (path.EndsWith(".json")) { using var data = JsonDocument.Parse(File.ReadAllBytes(file)); if (data.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidDataException($"Invalid JSON object: {path}"); }
+            if (path.EndsWith(".json"))
+            {
+                using var metadata = File.OpenRead(file);
+                if (metadata.Length > 16 * 1024 * 1024) throw new InvalidDataException($"Game metadata is too large: {path}");
+                using var data = JsonDocument.Parse(metadata);
+                if (data.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidDataException($"Invalid JSON object: {path}");
+            }
         }
         using var stream = File.OpenRead(SafePath(root, Required[0]));
         Span<byte> magic = stackalloc byte[4]; stream.ReadExactly(magic);
@@ -46,9 +52,14 @@ public static class Payload
     }
 }
 
-public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId, string? InventorySha256 = null)
+public sealed record InstallReceipt(uint AppId, uint DepotId, ulong ManifestId, string Branch, string PckSha256, int PatchSchema, int PatchedEntries, string PayloadId,
+    string? InventorySha256 = null, string? GameVersion = null)
 {
-    public string DisplayName() => DepotId == Payload.WindowsDepot ? $"{Branch} / {ManifestId}" : Branch;
+    public string DisplayName()
+    {
+        var source = DepotId == Payload.WindowsDepot ? $"{Branch} / {ManifestId}" : Branch;
+        return string.IsNullOrWhiteSpace(GameVersion) ? source : $"{GameVersion} · {source}";
+    }
 }
 public sealed class PayloadStore(string root)
 {
@@ -76,7 +87,8 @@ public sealed class PayloadStore(string root)
         Payload.Validate(staging);
         var hash = PayloadIntegrity.Hash(Payload.SafePath(staging, Payload.Required[0]), ct).ToLowerInvariant();
         var id = $"{manifestId}-{Guid.NewGuid():N}";
-        var receipt = new InstallReceipt(Payload.AppId, depotId, manifestId, source, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct));
+        var version = ReadGameVersion(staging);
+        var receipt = new InstallReceipt(Payload.AppId, depotId, manifestId, source, hash, 2, patched, id, PayloadIntegrity.Create(staging, ct), version);
         File.WriteAllText(Path.Combine(staging, ".payload_manifest.json"), JsonSerializer.Serialize(receipt));
         ct.ThrowIfCancellationRequested();
         var destination = Path.Combine(Root, "payload-" + id);
@@ -86,6 +98,14 @@ public sealed class PayloadStore(string root)
         try { using (var stream = new FileStream(temp, FileMode.CreateNew)) { JsonSerializer.Serialize(stream, receipt); stream.Flush(true); } File.Move(temp, Path.Combine(Root, "current.json"), true); }
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return receipt;
+    }
+
+    static string? ReadGameVersion(string stage)
+    {
+        using var stream = File.OpenRead(Payload.SafePath(stage, "release_info.json"));
+        using var release = JsonDocument.Parse(stream);
+        if (!release.RootElement.TryGetProperty("version", out var version) || version.ValueKind != JsonValueKind.String) return null;
+        return new string((version.GetString() ?? "").Where(character => !char.IsControl(character)).Take(64).ToArray()).Trim();
     }
     public IReadOnlyList<InstallReceipt> InstalledVersions()
     {

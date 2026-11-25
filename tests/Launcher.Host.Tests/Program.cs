@@ -24,6 +24,8 @@ unsafe
     delegate* unmanaged[Cdecl]<int> workshop = &Entry.BrowseWorkshop;
     delegate* unmanaged[Cdecl]<int> nexus = &Entry.BrowseNexus;
     delegate* unmanaged[Cdecl]<int> launchOptions = &Entry.BrowseLaunchOptions;
+    delegate* unmanaged[Cdecl]<int> beginGameSync = &Entry.BeginGameBackgroundSync;
+    delegate* unmanaged[Cdecl]<int> gameSyncActive = &Entry.GameBackgroundSyncActive;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
@@ -43,6 +45,7 @@ unsafe
     Check(workshop() == -1, "Workshop needs an initialized host");
     Check(nexus() == -1, "Nexus Mods needs an initialized host");
     Check(launchOptions() == -1, "Launch settings need an initialized host");
+    Check(beginGameSync() == -1 && gameSyncActive() == 0, "Background save sync requires the opt-in game launch context");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
 

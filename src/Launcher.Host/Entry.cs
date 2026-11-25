@@ -19,6 +19,7 @@ public static class Entry
     static LaunchProfile? activeProfile;
     static LaunchProfilePaths? launchProfilePaths;
     static GameLaunchOptions launchOptions = new();
+    static GameWebDavSync? gameWebDav;
     static string documents = "", managed = "";
     static CancellationTokenSource? active;
     static TaskCompletionSource<string>? prompt;
@@ -54,6 +55,9 @@ public static class Entry
             managed = Str(bundled);
             Directory.CreateDirectory(documents);
             HostDiagnostics.Initialize(Path.Combine(documents, "LauncherLogs"));
+            try { LaunchCopy.RemoveInterruptedCopies(documents); }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
+            { HostDiagnostics.Error("recover launch copy", error); }
             var support = Path.GetDirectoryName(store.Root)!;
             profiles = new LaunchProfiles(Path.Combine(support, "LaunchProfiles.json"), documents);
             try { activeProfile = profiles.Current(); }
@@ -168,8 +172,12 @@ public static class Entry
         {
             branches = await session.ListBranchesAsync(ct);
             var choices = branches.Where(b => b.ManifestId.HasValue || b.PasswordRequired)
-                .Select(b => new Choice(b.Name, b.Name,
-                    b.PasswordRequired ? "Password required" : $"Manifest {b.ManifestId}")).ToArray();
+                .Select(b =>
+                {
+                    var manifest = b.PasswordRequired ? "Password required" : $"Manifest {b.ManifestId}";
+                    var description = new string(b.Description.Where(character => !char.IsControl(character)).Take(160).ToArray());
+                    return new Choice(b.Name, b.Name, description.Length == 0 ? manifest : $"{manifest}\n{description}");
+                }).ToArray();
             if (choices.Length == 0) return new("error", "Steam returned no branches with a Windows depot manifest.");
             branch = await Ask("branch", "Select a Steam branch", ct, choices);
             if (!choices.Any(choice => choice.Value == branch)) throw new InvalidDataException("Invalid Steam branch selection.");
@@ -506,6 +514,7 @@ public static class Entry
                 {
                     WebDavAutomationMode.PullBeforePlay => "Download before playing",
                     WebDavAutomationMode.SyncBeforePlay => "Sync when starting the game",
+                    WebDavAutomationMode.SyncInBackground => "Sync before play and in the background",
                     _ => "Manual"
                 }));
                 choices.Add(new("pull", "Download saves", "Back up and apply remote changes"));
@@ -535,12 +544,14 @@ public static class Entry
                 var mode = await Ask("webdav-automation", "Automatic WebDAV sync", ct,
                     [new("manual", "Manual", "Sync only from the Saves page"),
                      new("pull", "Download before playing", "Check for new remote saves before launching"),
-                     new("sync", "Sync before playing", "Upload saves from the last session, then check for remote changes")]);
+                     new("sync", "Sync before playing", "Upload saves from the last session, then check for remote changes"),
+                     new("background", "Sync before play and in the background", "Try to upload when the game moves to the background")]);
                 ct.ThrowIfCancellationRequested();
                 WebDavVault.Save(settings with { Automation = mode switch
                 {
                     "pull" => WebDavAutomationMode.PullBeforePlay,
                     "sync" => WebDavAutomationMode.SyncBeforePlay,
+                    "background" => WebDavAutomationMode.SyncInBackground,
                     _ => WebDavAutomationMode.Manual
                 } });
                 return new("idle", "WebDAV sync mode saved.");
@@ -1187,12 +1198,13 @@ public static class Entry
             return new("error", "The selected game build uses a Harmony runtime that needs an iOS adapter.");
         }
         launchOptions = OptionsStore(payloads).Load();
-        WebDavAutomation? automation = null;
-        if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay } webDav)
+        GameWebDavSync? cloud = null;
+        if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay or
+            WebDavAutomationMode.SyncInBackground } webDav)
         {
             var profileKey = activeProfile.IsolateSaves ? activeProfile.Id : "shared";
-            automation = new WebDavAutomation(webDav, Payload.SafePath(support, "WebDavAutomation"), profileKey);
-            if (!await SyncBeforePlayAsync(automation, webDav, support, profileKey, profiles.SnapshotSaveDirectory(activeProfile), ct))
+            cloud = new GameWebDavSync(webDav, support, profileKey, profiles.SnapshotSaveDirectory(activeProfile));
+            if (!await SyncBeforePlayAsync(cloud, ct))
                 return new("idle", "Launch cancelled. Use WebDAV save sync to review the connection or conflicts.");
         }
         Publish(new("verify", "Preparing runtime files…"));
@@ -1221,27 +1233,22 @@ public static class Entry
         if (File.Exists(godotLog)) File.Move(godotLog, Payload.SafePath(documents, "LauncherLogs/godot.log.previous"), overwrite: true);
         assemblyRoot = plan.Assemblies;
         adapterRoot = adapter;
-        automation?.GameStarting();
+        cloud?.GameStarting();
+        gameWebDav = cloud;
         loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
         releaseInfo = Path.Combine(Path.GetDirectoryName(plan.Pack)!, "release_info.json");
         return new("ready", "Game verified. Starting Godot…");
     }
 
-    static async Task<bool> SyncBeforePlayAsync(WebDavAutomation automation, WebDavSettings settings, string support,
-        string profileKey, string saves, CancellationToken ct)
+    static async Task<bool> SyncBeforePlayAsync(GameWebDavSync cloud, CancellationToken ct)
     {
-        var snapshots = Payload.SafePath(support, $"SaveSnapshots/{profileKey}");
-        var baseline = Payload.SafePath(support, "WebDavBaselines");
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(TimeSpan.FromSeconds(60));
-            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
-            var cloud = new WebDavSaves(http, settings);
-            await automation.BeforePlayAsync(async (upload, token) =>
+            await cloud.BeforePlayAsync(upload =>
             {
                 Publish(new("webdav", upload ? "Uploading the previous session’s saves…" : "Checking WebDAV for new saves…"));
-                await cloud.SyncAsync(saves, snapshots, baseline, profileKey, upload, overwriteConflicts: false, token);
             }, deadline.Token);
             return true;
         }
@@ -1257,6 +1264,19 @@ public static class Entry
                  new("play", "Play with iPad saves", "Continue using the save files currently on this device")]);
             return action == "play";
         }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BeginGameBackgroundSync() => gameWebDav?.StartBackground() == true ? 0 : -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int GameBackgroundSyncActive() => gameWebDav?.BackgroundActive == true ? 1 : 0;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int CancelGameBackgroundSync()
+    {
+        gameWebDav?.CancelBackground();
+        return 0;
     }
 
     [DllImport("__Internal", EntryPoint = "sts2_extensions_available")]

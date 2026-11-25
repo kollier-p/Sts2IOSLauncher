@@ -158,7 +158,7 @@ public sealed class SaveSnapshots(string saves, string backups)
     public static void RecoverInterruptedRestore(string saves)
     {
         var path = Path.GetFullPath(saves);
-        if (!Directory.Exists(Previous(path))) return;
+        if (!Directory.Exists(Path.GetDirectoryName(path))) return;
         using var operation = Lock(path);
         Recover(path);
     }
@@ -240,15 +240,24 @@ public sealed class SaveSnapshots(string saves, string backups)
     static void Recover(string path)
     {
         var previous = Previous(path);
-        if (!Directory.Exists(previous)) return;
         var parent = Path.GetDirectoryName(previous)!;
-        Payload.SafePath(parent, Path.GetFileName(previous));
-        if (!Directory.Exists(path)) Directory.Move(previous, path);
-        else
+        if (Directory.Exists(previous))
         {
-            // An interrupted cleanup can be retried on the next access.
-            try { Directory.Delete(previous, recursive: true); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            Payload.SafePath(parent, Path.GetFileName(previous));
+            if (!Directory.Exists(path)) Directory.Move(previous, path);
+            else
+            {
+                try { Directory.Delete(previous, recursive: true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        var prefix = Path.GetFileName(path) + ".restore-";
+        foreach (var staging in Directory.EnumerateDirectories(parent, prefix + "*"))
+        {
+            var name = Path.GetFileName(staging);
+            if (!ValidId(name[prefix.Length..])) continue;
+            try { Directory.Delete(Payload.SafePath(parent, name), recursive: true); }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException) { }
         }
     }
 

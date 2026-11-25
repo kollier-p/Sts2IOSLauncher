@@ -25,6 +25,13 @@ try
     LaunchCopy.Copy(copySource, copyTarget);
     Assert(File.ReadAllBytes(copyTarget).SequenceEqual(copyBytes), "Launch copy preserves all bytes across buffer boundaries");
     Reject(() => LaunchCopy.Copy(copySource, copyTarget));
+    var interruptedPackCopy = Path.Combine(root, $"StS2.pck.{Guid.NewGuid():N}.tmp");
+    var unrelatedPackCopy = Path.Combine(root, "StS2.pck.manual.tmp");
+    File.WriteAllText(interruptedPackCopy, "unfinished copy");
+    File.WriteAllText(unrelatedPackCopy, "user file");
+    LaunchCopy.RemoveInterruptedCopies(root);
+    Assert(!File.Exists(interruptedPackCopy) && File.Exists(unrelatedPackCopy) && File.Exists(copySource),
+        "Startup only cleans interrupted launch copies with the launcher's naming schema");
     Assert(File.ReadAllBytes(copyTarget).SequenceEqual(copyBytes), "Launch copy never overwrites an existing staging file");
     File.Delete(copySource);
     File.Delete(copyTarget);
@@ -128,7 +135,9 @@ try
     Assert(TransferEstimate.Calculate(100, 100, 700, TimeSpan.FromSeconds(2)).Remaining is null, "No speed no ETA");
     Assert(TransferEstimate.Calculate(100, 700, 700, TimeSpan.FromSeconds(2)).Remaining == TimeSpan.Zero, "Finished ETA");
     var second = store.NewStaging(); Fixture(second);
+    File.WriteAllText(Path.Combine(second, "release_info.json"), """{"version":"v0.111.1"}""");
     var newer = store.Install(second, 789, "public");
+    Assert(newer.DisplayName() == "v0.111.1 · public / 789", "Installed version labels show verified release metadata");
     Assert(store.InstalledVersions().Count == 2, "List installed versions");
     Assert(store.Current() == newer, "New version active");
     Assert(store.ActivateVersion(receipt.PayloadId) == receipt && store.Current() == receipt, "Rollback to previous version");
@@ -273,8 +282,11 @@ try
     Reject(() => snapshotStore.Restore(snapshot.Id));
     Assert(File.ReadAllText(saveFile) == "second run", "A failed snapshot verification preserves live saves");
     Directory.Move(saves, saves + ".before-restore");
+    var staleRestore = saves + $".restore-{Guid.NewGuid():N}";
+    Directory.CreateDirectory(staleRestore);
     SaveSnapshots.RecoverInterruptedRestore(saves);
-    Assert(File.ReadAllText(saveFile) == "second run", "Interrupted restore recovers the previous save directory");
+    Assert(File.ReadAllText(saveFile) == "second run" && !Directory.Exists(staleRestore),
+        "Interrupted restore recovers the previous save directory and clears the unused stage");
     var targetSlot = Directory.CreateDirectory(Path.Combine(saves, "Modded", "Profile1", "Saves")).FullName;
     File.WriteAllText(Path.Combine(targetSlot, "progress.save"), "older modded data");
     Assert(snapshotStore.TransferSlot(1, toModded: true) == 1 &&
@@ -311,8 +323,12 @@ try
     Assert(SyncDav(false).Transferred == 2 && File.ReadAllText(syncFile) == "server run" &&
         File.ReadAllText(Path.Combine(syncRoot, "modded", syncSave)) == "server modded run" &&
         !File.Exists(Path.Combine(syncRoot, "settings.save")), "WebDAV uses the Android slot layout and preserves normal and modded saves separately");
+    var priorVersion = dav.Version(syncSlot + syncSave);
+    var previousGets = dav.GetRequests;
+    Assert(SyncDav(false).Transferred == 0 && dav.GetRequests == previousGets,
+        "A second sync reuses the hashes of unchanged strong ETag versions");
     File.WriteAllText(syncFile, "local next run");
-    Assert(SyncDav(true).Transferred == 1 && dav.Files[syncSlot + syncSave] == "local next run" && dav.LastIfMatch?.Tag == "\"save-version\"",
+    Assert(SyncDav(true).Transferred == 1 && dav.Files[syncSlot + syncSave] == "local next run" && dav.LastIfMatch?.Tag == priorVersion,
         "WebDAV uploads the active changes with a conditional request");
     File.WriteAllText(syncFile, "unsynced local run");
     dav.Files[syncSlot + syncSave] = "other device run";
@@ -344,6 +360,15 @@ try
     automaticCalls.Clear();
     automaticWebDav.BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
     Assert(automaticCalls.SequenceEqual(new[] { false }), "A successful upload clears the previous session marker");
+    automaticCalls.Clear();
+    var backgroundSettings = automaticSettings with { Automation = WebDavAutomationMode.SyncInBackground };
+    var backgroundSync = new WebDavAutomation(backgroundSettings, automaticRoot, "shared");
+    backgroundSync.GameStarting();
+    backgroundSync.WhileBackgroundedAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { true }), "The opt-in background policy uploads without pulling in the game");
+    automaticCalls.Clear();
+    backgroundSync.BeforePlayAsync(LogSync, CancellationToken.None).GetAwaiter().GetResult();
+    Assert(automaticCalls.SequenceEqual(new[] { true, false }), "A background upload retains the marker for later game changes");
     var modsRoot = Path.Combine(root, "mod-profile", "mods");
     var mods = new ModLibrary(modsRoot);
     var rarPath = Path.Combine(root, "Fixture mod.rar");
