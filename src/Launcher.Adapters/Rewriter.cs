@@ -76,16 +76,52 @@ else if (args[0] == "steamkit")
 }
 else throw new ArgumentException("Unknown assembly adapter.");
 
-string temporary = args[3] + "." + Guid.NewGuid().ToString("N") + ".tmp";
-try
-{
-    assembly.Write(temporary);
-    File.Move(temporary, args[3], overwrite: true);
-}
-finally { if (File.Exists(temporary)) File.Delete(temporary); }
+WriteAssembly(assembly, args[3]);
 Console.WriteLine($"Prepared {args[0]} for the iOS JIT runtime.");
-
 }
+
+    public static bool PrepareGodotDiagnostics(string input, string output)
+    {
+        if (Path.GetFullPath(input) == Path.GetFullPath(output))
+            throw new ArgumentException("The original assembly must remain unchanged.");
+        using var assembly = AssemblyDefinition.ReadAssembly(input);
+        if (assembly.Name.Name != "GodotSharp") return false;
+        var formatter = assembly.MainModule.GetType("Godot.DebuggingUtils")?.Methods.FirstOrDefault(method =>
+            method.Name == "GetStackFrameMethodDecl" && method.IsStatic && method.HasBody &&
+            method.ReturnType.MetadataType == MetadataType.Void && method.Parameters.Count == 2 &&
+            method.Parameters[0].ParameterType.FullName == "System.Diagnostics.StackFrame" &&
+            method.Parameters[1].ParameterType.FullName == "System.String&");
+        if (formatter is null) return false;
+        var calls = formatter.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Callvirt &&
+            instruction.Operand is MethodReference method && method.DeclaringType.FullName == "System.Reflection.MethodBase" &&
+            method.Name == "GetParameters" && method.Parameters.Count == 0 &&
+            method.ReturnType.FullName == "System.Reflection.ParameterInfo[]").ToArray();
+        if (calls.Length != 1) return false;
+
+        // Warning backtraces can walk Harmony-generated frames whose parameter
+        // metadata aborts the iOS Mono runtime. Keep frame names and source lines.
+        var call = calls[0];
+        var parameterType = ((ArrayType)((MethodReference)call.Operand).ReturnType).ElementType;
+        var il = formatter.Body.GetILProcessor();
+        call.OpCode = OpCodes.Pop;
+        call.Operand = null;
+        var length = Instruction.Create(OpCodes.Ldc_I4_0);
+        il.InsertAfter(call, length);
+        il.InsertAfter(length, Instruction.Create(OpCodes.Newarr, parameterType));
+        WriteAssembly(assembly, output);
+        return true;
+    }
+
+    static void WriteAssembly(AssemblyDefinition assembly, string output)
+    {
+        string temporary = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            assembly.Write(temporary);
+            File.Move(temporary, output, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
 
     static void ReplaceSteamKitJobTimestamp(ModuleDefinition module)
     {

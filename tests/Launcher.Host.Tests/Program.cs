@@ -34,6 +34,9 @@ unsafe
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
     delegate* unmanaged[Cdecl]<int> signIn = &Entry.SignInSteam;
     delegate* unmanaged[Cdecl]<int> startHooks = &Entry.StartGameHooks;
+    delegate* unmanaged[Cdecl]<nint, int, int> sendGameKey = &Entry.SendGameKey;
+    delegate* unmanaged[Cdecl]<int> releaseGameKeys = &Entry.ReleaseGameKeys;
+    delegate* unmanaged[Cdecl]<int, int> setGameParked = &Entry.SetGameParked;
 
     Check(prepare() == -1, "An uninitialized host rejects launch");
     Check(prepareSafe() == -1, "An uninitialized host rejects a safe launch");
@@ -52,6 +55,8 @@ unsafe
     Check(launchOptions() == -1, "Launch settings need an initialized host");
     Check(beginGameSync() == -1 && gameSyncActive() == 0, "Background save sync requires the opt-in game launch context");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
+    Check(sendGameKey(0, 0) == -1 && releaseGameKeys() == 0 && setGameParked(0) == 0,
+        "The game controls are safe before Godot creates a scene");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
     Check(signIn() == -1, "The Steam session command waits for the launcher host");
 
@@ -259,6 +264,40 @@ try
         "Isolated and paused mods require the scanner signature");
 }
 finally { Directory.Delete(compatibilityDirectory, recursive: true); }
+
+var diagnosticsDirectory = Directory.CreateTempSubdirectory("sts2-godot-diagnostics-").FullName;
+try
+{
+    var input = Path.Combine(diagnosticsDirectory, "GodotSharp.original.dll");
+    var output = Path.Combine(diagnosticsDirectory, "GodotSharp.dll");
+    using var godot = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition("GodotSharp", new Version(4, 5, 1)),
+        "GodotSharp", ModuleKind.Dll);
+    var module = godot.MainModule;
+    var debugging = new TypeDefinition("Godot", "DebuggingUtils", TypeAttributes.Class, module.TypeSystem.Object);
+    module.Types.Add(debugging);
+    var formatter = new MethodDefinition("GetStackFrameMethodDecl", MethodAttributes.Static, module.TypeSystem.Void);
+    formatter.Parameters.Add(new ParameterDefinition(module.ImportReference(typeof(System.Diagnostics.StackFrame))));
+    formatter.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.TypeSystem.String)));
+    debugging.Methods.Add(formatter);
+    var il = formatter.Body.GetILProcessor();
+    il.Emit(OpCodes.Ldnull);
+    il.Emit(OpCodes.Callvirt, module.ImportReference(typeof(System.Reflection.MethodBase).GetMethod("GetParameters")!));
+    il.Emit(OpCodes.Pop);
+    il.Emit(OpCodes.Ret);
+    godot.Write(input);
+
+    Check(Rewriter.PrepareGodotDiagnostics(input, output), "The expected Godot diagnostic formatter is adaptable");
+    using var original = AssemblyDefinition.ReadAssembly(input);
+    using var adapted = AssemblyDefinition.ReadAssembly(output);
+    var before = original.MainModule.GetType("Godot.DebuggingUtils").Methods.Single().Body.Instructions;
+    var after = adapted.MainModule.GetType("Godot.DebuggingUtils").Methods.Single().Body.Instructions;
+    Check(before.Any(instruction => instruction.OpCode == OpCodes.Callvirt) &&
+        !after.Any(instruction => instruction.OpCode == OpCodes.Callvirt) &&
+        after.Any(instruction => instruction.OpCode == OpCodes.Newarr &&
+            instruction.Operand is TypeReference type && type.FullName == "System.Reflection.ParameterInfo"),
+        "The diagnostic adapter replaces only parameter reflection and preserves the installed assembly");
+}
+finally { Directory.Delete(diagnosticsDirectory, recursive: true); }
 
 var steamKitDirectory = Directory.CreateTempSubdirectory("sts2-steamkit-").FullName;
 var steamKitContext = new AssemblyLoadContext("SteamKit iOS adapter test", isCollectible: true);

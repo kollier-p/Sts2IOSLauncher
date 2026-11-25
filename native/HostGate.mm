@@ -14,6 +14,8 @@ using InitRuntime = int (*)(const char*,const char*,const char*);
 using GetDelegate = int (*)(const char*,void**);
 using InitHost = int (*)(const char*,const char*,const char*);
 using Command = int (*)(const char*);
+using KeyCommand = int (*)(const char*,int);
+using GameVisibility = int (*)(int);
 using Reply = int (*)(const char*,int64_t);
 using Simple = int (*)();
 using Status = int (*)(char*,int);
@@ -21,12 +23,18 @@ enum class ArchivePicker { Game, Mod, Snapshot };
 static BOOL (*godotLaunch)(id,SEL,UIApplication*,NSDictionary*);
 static NSMutableDictionary<NSString*,NSValue*> *lifecycle;
 static BOOL started = NO;
+static BOOL gameVisible = NO, returningToLauncher = NO;
+static UIWindow *gameWindow;
+static void (*audioInterruption)(id,SEL,NSNotification *);
 static InitHost initHost;
 static Command beginDownload, beginImport, beginModImport, beginSnapshotImport;
 static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
     browseLaunchOptions, cancelOperation, prepareGame, prepareSafeGame, signInSteam, forgetSession;
 static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
+static Simple releaseGameKeys;
+static GameVisibility setGameParked;
+static KeyCommand sendGameKey;
 static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
 static Status copyStatus;
@@ -68,6 +76,9 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
         {"SignInSteam", (void **)&signInSteam},
         {"Prepare", (void **)&prepareGame},
         {"PrepareSafe", (void **)&prepareSafeGame},
+        {"SendGameKey", (void **)&sendGameKey},
+        {"ReleaseGameKeys", (void **)&releaseGameKeys},
+        {"SetGameParked", (void **)&setGameParked},
         {"CopyStatus", (void **)&copyStatus},
     };
     for (const auto &binding : bindings) {
@@ -219,6 +230,7 @@ static BOOL workshopImageURL(NSURL *url) {
 
 #include "LauncherWorkshop.mm"
 #include "LauncherInstalledMods.mm"
+#include "LauncherGameKeys.mm"
 
 @interface LauncherDiagnostics : UIViewController
 @property(nonatomic,copy) NSURL *directory;
@@ -319,8 +331,10 @@ __attribute__((visibility("default")))
 @property(nonatomic,assign) BOOL canContinueInBackground;
 @property(nonatomic,assign) UIBackgroundTaskIdentifier launcherBackgroundTask;
 - (void)tick;
+- (void)startPolling;
 @end
 static LauncherGate *gate;
+static LauncherGameKeys *gameKeys;
 static BOOL delayedLaunch(id service,SEL selector,UIApplication *application,NSDictionary *options) {
     gate=[LauncherGate new];gate.service=service;gate.application=application;gate.options=options;
     gate.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -350,18 +364,64 @@ static void startGameSync(UIApplication *application) {
 }
 static void forward(id service,SEL selector,UIApplication *application) {
     if(!started)return;
+    if(!gameVisible && selector!=@selector(applicationWillTerminate:) &&
+        selector!=@selector(applicationDidReceiveMemoryWarning:))return;
+    if(selector==@selector(applicationWillResignActive:)){
+        releaseGameKeys();
+        [gameKeys resetModifiers];
+    }
     if(selector==@selector(applicationWillEnterForeground:) || selector==@selector(applicationWillTerminate:))
         endGameSync(application,YES);
     auto original=(void(*)(id,SEL,UIApplication*))lifecycle[NSStringFromSelector(selector)].pointerValue;
     if(original)original(service,selector,application);
     if(selector==@selector(applicationDidEnterBackground:))startGameSync(application);
 }
+static void forwardAudioInterruption(id service,SEL selector,NSNotification *notification) {
+    if(gameVisible && audioInterruption)audioInterruption(service,selector,notification);
+}
+
+extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launcher() {
+    if(!NSThread.isMainThread){
+        dispatch_async(dispatch_get_main_queue(), ^{sts2_return_to_launcher();});
+        return 1;
+    }
+    if(!started || !gate || !gameWindow)return 0;
+    if(!gameVisible || returningToLauncher)return 1;
+    returningToLauncher=YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        forward(gate.service,@selector(applicationWillResignActive:),gate.application);
+        setGameParked(1);
+        gameVisible=NO;
+        [gate.service setValue:gate.window forKey:@"window"];
+        [gate.window makeKeyAndVisible];
+        gameWindow.hidden=YES;
+        [gate startPolling];
+        [gate tick];
+        startGameSync(gate.application);
+        returningToLauncher=NO;
+    });
+    return 1;
+}
+
+extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_ready() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if(!gameWindow || gameKeys)return;
+        gameKeys=[LauncherGameKeys new];
+        gameKeys.sendKey=^(NSString *key,int modifiers){
+            if(gameVisible && !returningToLauncher)sendGameKey(key.UTF8String,modifiers);
+        };
+        [gameKeys installInWindow:gameWindow];
+    });
+}
+
 @implementation LauncherGate
 + (void)load {
     Class service=NSClassFromString(@"GDTAppDelegateService");
     Method method=class_getInstanceMethod(service,@selector(application:didFinishLaunchingWithOptions:));
     if(!method)return; // CI inspects the generated host for this symbol.
     godotLaunch=(BOOL(*)(id,SEL,UIApplication*,NSDictionary*))method_setImplementation(method,(IMP)delayedLaunch);
+    Method interruption=class_getInstanceMethod(service,@selector(onAudioInterruption:));
+    if(interruption)audioInterruption=(void(*)(id,SEL,NSNotification *))method_setImplementation(interruption,(IMP)forwardAudioInterruption);
     lifecycle=[NSMutableDictionary new];
     for(NSString *name in @[@"applicationDidBecomeActive:",@"applicationWillResignActive:",@"applicationDidEnterBackground:",@"applicationWillEnterForeground:",@"applicationDidReceiveMemoryWarning:",@"applicationWillTerminate:"]){
         Method m=class_getInstanceMethod(service,NSSelectorFromString(name));
@@ -470,6 +530,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.safePlay.enabled=NO;
     self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
     self.steamSignIn.enabled=NO;
+    [self startPolling];
+}
+- (void)startPolling {
+    [self.timer invalidate];
     self.timer=[NSTimer timerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
@@ -520,6 +584,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
         [@[@"confirm",@"code"] containsObject:state[@"Prompt"]]);
     if(!self.canContinueInBackground) [self endLauncherBackgroundTask];
     BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];
+    BOOL parked=started && !gameVisible;
     NSString *installed=[state[@"Installed"] isKindOfClass:NSString.class]?state[@"Installed"]:nil;
     NSString *profile=[state[@"Profile"] isKindOfClass:NSString.class]?state[@"Profile"]:nil;
     self.installation.text=installed?[NSString stringWithFormat:@"Installed: %@",installed]:@"No game installed";
@@ -527,17 +592,25 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSString *steamAccount=[state[@"SteamAccount"] isKindOfClass:NSString.class]?state[@"SteamAccount"]:nil;
     self.steamAccount.text=steamAccount?[NSString stringWithFormat:@"Steam: %@%@",steamAccount,
         [state[@"SteamSessionTemporary"] boolValue]?@" (saved for this launch only)":@""]:@"Steam: Signed out";
-    self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
+    self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle && !parked;
     self.forget.enabled=idle && steamAccount!=nil;
     self.forget.hidden=steamAccount==nil;
     self.steamSignIn.enabled=idle;
     self.steamSignIn.hidden=steamAccount!=nil;
-    self.play.enabled=idle && installed!=nil && profile!=nil;
-    self.safePlay.enabled=self.play.enabled;
-    self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
-    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
+    self.play.enabled=idle && (parked || (installed!=nil && profile!=nil));
+    NSString *playTitle=parked?@"Resume game":@"Play installed game";
+    UIButtonConfiguration *playStyle=self.play.configuration;
+    if(![playStyle.title isEqualToString:playTitle]){
+        playStyle.title=playTitle;
+        self.play.configuration=playStyle;
+    }
+    self.safePlay.enabled=self.play.enabled && !parked;
+    self.safePlay.hidden=parked;
+    self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil && !parked;
+    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil && !parked;
     self.diagnostics.enabled=idle;
-    self.files.enabled=self.launchOptions.enabled=idle;
+    self.files.enabled=idle && !parked;
+    self.launchOptions.enabled=idle;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -570,7 +643,13 @@ static void forward(id service,SEL selector,UIApplication *application) {
         NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
         recordStartupStatus(documents, @"Starting Godot");
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
-        if(ok){started=YES;forward(self.service,@selector(applicationDidBecomeActive:),self.application);old.hidden=YES;gate=nil;}
+        if(ok){
+            gameWindow=[self.service valueForKey:@"window"];
+            started=YES;
+            gameVisible=YES;
+            forward(self.service,@selector(applicationDidBecomeActive:),self.application);
+            old.hidden=YES;
+        }
         else{self.message.text=@"Godot startup failed. Restart the app.";}
     }
 }
@@ -822,7 +901,21 @@ static void forward(id service,SEL selector,UIApplication *application) {
     else if(rc==-3)[self showError:@"Enter the numeric Steam manifest ID or leave it blank."];
     else if(rc!=0)[self showError:@"Unable to start the Steam download."];
 }
-- (void)playPressed { [self.view endEditing:YES];if(prepareGame()!=0)[self showError:@"Another operation is active."]; }
+- (void)playPressed {
+    [self.view endEditing:YES];
+    if(started && !gameVisible && gameWindow){
+        [self.timer invalidate];
+        endGameSync(self.application,YES);
+        [self.service setValue:gameWindow forKey:@"window"];
+        [gameWindow makeKeyAndVisible];
+        self.window.hidden=YES;
+        gameVisible=YES;
+        forward(self.service,@selector(applicationDidBecomeActive:),self.application);
+        setGameParked(0);
+        return;
+    }
+    if(prepareGame()!=0)[self showError:@"Another operation is active."];
+}
 - (void)safePlayPressed { [self.view endEditing:YES];if(prepareSafeGame()!=0)[self showError:@"Another operation is active."]; }
 - (void)cancelPressed {cancelOperation();}
 @end

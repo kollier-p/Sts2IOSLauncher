@@ -51,6 +51,7 @@ def main():
     shutil.copy2(ROOT/"native/LauncherFiles.mm",src/"LauncherFiles.mm")
     shutil.copy2(ROOT/"native/LauncherWorkshop.mm",src/"LauncherWorkshop.mm")
     shutil.copy2(ROOT/"native/LauncherInstalledMods.mm",src/"LauncherInstalledMods.mm")
+    shutil.copy2(ROOT/"native/LauncherGameKeys.mm",src/"LauncherGameKeys.mm")
     with dummy.open("a") as f:f.write('\n#include "HostGate.mm"\n')
     metadata=plistlib.loads(info.read_bytes())
     revision=subprocess.run(["git","-C",ROOT,"rev-parse","HEAD"],capture_output=True,text=True,check=False).stdout.strip()

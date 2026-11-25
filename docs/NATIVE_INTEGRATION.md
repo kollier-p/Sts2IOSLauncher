@@ -18,6 +18,10 @@ The same save conflict checks apply to manual Steam Cloud sync. Downloads show f
 
 **Play → Launch without mods or preload** runs the selected installation with an empty mod directory and the game’s own launch settings for that session. **Tools → View logs → Startup** records the handoff from Godot to the game assembly and launcher compatibility hooks. The **Launcher** log identifies each hook as it is installed.
 
+The in-game **Quit** action returns to the launcher after the game’s own quit routine. **Resume game** brings the parked session back. Reopen the app for a fresh game session or to change versions, mods, or saves. Tap the floating keyboard icon for letters, numbers, function keys, navigation keys, and modifier combinations. Tap it again to collapse it, or drag the icon up and down to move it.
+
+The launch copy of GodotSharp omits parameter lists from formatted C# backtraces. Native warnings, managed method names, and available source locations still appear in the log. This removes the reflection call that aborted Mono while formatting a battle texture warning.
+
 ## Native dependencies
 
 The launch copy of the PCK receives managed script placeholders and descriptors for the bundled FMOD and Spine frameworks. Extension-inclusive builds require the applicable licenses. Touch, controller, rendering and audio behavior must be verified on the target iPad.

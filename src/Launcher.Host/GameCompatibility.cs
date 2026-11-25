@@ -19,6 +19,8 @@ internal static class GameCompatibility
     static Type? modSettingsType;
     static bool enableLauncherMods;
     static GameLaunchOptions? pendingLaunchOptions;
+    static bool pendingSafeMode;
+    static Assembly? pendingGame;
     public static void Apply(Assembly game, LaunchProfile profile, LaunchProfilePaths paths, string release, bool hasEnabledMods)
     {
         profilePaths=paths;releaseInfo=release;
@@ -83,7 +85,7 @@ internal static class GameCompatibility
         catch (Exception error) { HostDiagnostics.Error("configure iOS pointer compatibility", error); }
     }
 
-    public static void ApplyLaunchOptions(GameLaunchOptions options, Assembly game)
+    public static void ApplyLaunchOptions(GameLaunchOptions options, Assembly game, bool safeMode = false)
     {
         if (!OperatingSystem.IsIOS() && !options.RenderWarmup && options.FrameLimit is null && options.TouchAsMouse is null)
             return;
@@ -100,7 +102,9 @@ internal static class GameCompatibility
             // entry point returns. Singleton calls such as DisplayServer.HasFeature
             // must wait until a scene is active.
             Patch(ready, typeof(GameCompatibility).GetMethod(nameof(MainMenuReady), Flags)!, "postfix");
+            pendingGame = game;
             pendingLaunchOptions = options;
+            pendingSafeMode = safeMode;
             HostDiagnostics.Stage("main menu launch options hook installed");
         }
         catch (Exception error) { HostDiagnostics.Error("install main menu launch options", error); }
@@ -110,6 +114,8 @@ internal static class GameCompatibility
     {
         if (pendingLaunchOptions is not { } options) return;
         pendingLaunchOptions = null;
+        var game = pendingGame;
+        pendingGame = null;
         var node = __instance.GetType();
         while (node is not null && node.FullName != "Godot.Node") node = node.BaseType;
         if (node is null)
@@ -119,13 +125,49 @@ internal static class GameCompatibility
         }
         var godot = node.Assembly;
         HostDiagnostics.Stage("applying launch options after the game menu opened");
-        if (OperatingSystem.IsIOS()) PatchUnsupportedMouseCalls(godot);
+        if (OperatingSystem.IsIOS())
+        {
+            ConfigureSessionControls(__instance, godot, game);
+            if (!pendingSafeMode) PatchUnsupportedMouseCalls(godot);
+        }
         ApplyGodotOptions(options, godot);
         if (options.RenderWarmup)
         {
             GameRenderWarmup.Extended = options.ExtendedWarmup;
             GameRenderWarmup.MainMenuReady(__instance, godot);
         }
+    }
+
+    static void ConfigureSessionControls(object menu, Assembly godot, Assembly? game)
+    {
+        try
+        {
+            var tree = godot.GetType("Godot.SceneTree", throwOnError: true)!;
+            GameSession.Attach(menu, godot, game);
+            var quit = tree.GetMethod("Quit", [typeof(int)])!;
+            Patch(quit, typeof(GameSession).GetMethod(nameof(GameSession.SceneQuitPrefix))!);
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure scene quit", error); }
+
+        try
+        {
+            // Some game versions skip SceneTree.Quit on mobile. Keep their original
+            // save/quit code and show the launcher when it has completed.
+            var gameQuit = game?.GetType("MegaCrit.Sts2.Core.Nodes.NGame")?.GetMethod("Quit", Flags,
+                binder: null, types: Type.EmptyTypes, modifiers: null);
+            if (gameQuit?.ReturnType == typeof(void))
+                Patch(gameQuit, typeof(GameSession).GetMethod(nameof(GameSession.GameQuitPostfix))!, "postfix");
+            else if (gameQuit?.ReturnType == typeof(Task))
+                Patch(gameQuit, typeof(GameSession).GetMethod(nameof(GameSession.AsyncGameQuitPostfix))!, "postfix");
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure game quit", error); }
+
+        try
+        {
+            GameKeyboard.Attach(menu, godot);
+            GameSession.KeyboardReady();
+        }
+        catch (Exception error) { HostDiagnostics.Error("configure game keyboard", error); }
     }
 
     static void ApplyGodotOptions(GameLaunchOptions options, Assembly godot)

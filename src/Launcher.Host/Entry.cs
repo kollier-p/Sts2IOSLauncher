@@ -1517,6 +1517,11 @@ public static class Entry
             HostDiagnostics.Error("prepare Harmony", error);
             return new("error", "The selected game build uses a Harmony runtime that needs an iOS adapter.");
         }
+        var godot = Path.Combine(plan.Assemblies, "GodotSharp.dll");
+        var godotDiagnostics = Path.Combine(adapter, "GodotSharp.dll");
+        var adaptedDiagnostics = File.Exists(godot) && Launcher.Adapters.Rewriter.PrepareGodotDiagnostics(godot, godotDiagnostics);
+        if (!adaptedDiagnostics && File.Exists(godotDiagnostics)) File.Delete(godotDiagnostics);
+        HostDiagnostics.Stage(adaptedDiagnostics ? "prepared Godot backtrace parameter guard" : "Godot backtrace guard unavailable");
         launchOptions = OptionsStore(payloads).Load();
         launchSafeMode = safeMode;
         if (safeMode) launchOptions = new(RenderWarmup: false);
@@ -1557,6 +1562,7 @@ public static class Entry
         adapterRoot = adapter;
         cloud?.GameStarting();
         gameWebDav = cloud;
+        if (adaptedDiagnostics) AssemblyLoadContext.Default.LoadFromAssemblyPath(godotDiagnostics);
         loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
         releaseInfo = Path.Combine(Path.GetDirectoryName(plan.Pack)!, "release_info.json");
         HostDiagnostics.Stage($"launch prepared: mods {(launchProfilePaths.ModsPaused ? "paused" : "normal")}, " +
@@ -1620,7 +1626,7 @@ public static class Entry
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException(), launchHasEnabledMods);
             GameRenderWarmup.CatalogDirectory = adapterRoot;
-            if (!launchSafeMode) GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!);
+            GameCompatibility.ApplyLaunchOptions(launchOptions, loadedGame!, launchSafeMode);
             HostDiagnostics.Stage("game compatibility hooks installed");
             return 0;
         }
@@ -1630,6 +1636,29 @@ public static class Entry
                 error is TargetInvocationException { InnerException: { } cause } ? cause : error);
             return -1;
         }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int SendGameKey(nint name, int modifiers)
+    {
+        try { return GameKeyboard.Send(Str(name), modifiers) ? 0 : -1; }
+        catch (Exception error) { HostDiagnostics.Error("queue game keyboard event", error); return -1; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int ReleaseGameKeys()
+    {
+        GameKeyboard.Reset();
+        return 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int SetGameParked(int parked)
+    {
+        GameSession.SetParked(parked != 0);
+        if (parked != 0)
+            Publish(new("idle", "Game paused. Reopen the app to change versions, mods, or saves."));
+        return 0;
     }
 
     sealed class DirectProgress<T>(Action<T> report) : IProgress<T>
