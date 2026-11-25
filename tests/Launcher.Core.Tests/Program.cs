@@ -209,6 +209,14 @@ try
     PayloadStorage.EnsureCapacity(11, null);
     Reject(() => PayloadStorage.EnsureCapacity(11, 10));
     var profileSettings = Path.Combine(root, "profiles.json");
+    var optionSettings = Path.Combine(root, "launch-options.json");
+    var options = new GameLaunchOptionsStore(optionSettings);
+    Assert(options.Load() == new GameLaunchOptions(), "Launch settings default to the installed game");
+    var overrides = new GameLaunchOptions(120, false);
+    options.Save(overrides);
+    Assert(new GameLaunchOptionsStore(optionSettings).Load() == overrides, "Frame and touch settings survive a restart");
+    Reject(() => options.Save(new GameLaunchOptions(800)));
+    Assert(options.Load() == overrides, "Invalid launch options preserve the saved configuration");
     var profileData = Directory.CreateDirectory(Path.Combine(root, "documents")).FullName;
     var profiles = new LaunchProfiles(profileSettings, profileData);
     Assert(profiles.Current() == LaunchProfiles.Default, "Upgrades keep the default launch profile");
@@ -239,6 +247,15 @@ try
     var saveFile = Path.Combine(slot, "current_run.save");
     File.WriteAllText(saveFile, "first run");
     var snapshot = snapshotStore.Create("Manual")!;
+    var exported = snapshotStore.ExportArchive(snapshot.Id, Path.Combine(root, "save-exports"));
+    var importedSnapshot = snapshotStore.ImportArchive(exported);
+    Assert(importedSnapshot.Id != snapshot.Id && importedSnapshot.Files == snapshot.Files &&
+        importedSnapshot.Reason == snapshot.Reason, "An Android-compatible ZIP imports as a separate save snapshot");
+    var unexpectedSnapshot = Path.Combine(root, "unexpected-snapshot.zip");
+    File.Copy(exported, unexpectedSnapshot);
+    using (var unsafeSnapshot = ZipFile.Open(unexpectedSnapshot, ZipArchiveMode.Update))
+        unsafeSnapshot.CreateEntry("../unexpected.save");
+    Reject(() => snapshotStore.ImportArchive(unexpectedSnapshot));
     File.WriteAllText(saveFile, "second run");
     Assert(snapshotStore.Restore(snapshot.Id) == snapshot && File.ReadAllText(saveFile) == "first run",
         "Restore the exact selected snapshot");
@@ -251,6 +268,13 @@ try
     Directory.Move(saves, saves + ".before-restore");
     SaveSnapshots.RecoverInterruptedRestore(saves);
     Assert(File.ReadAllText(saveFile) == "second run", "Interrupted restore recovers the previous save directory");
+    var targetSlot = Directory.CreateDirectory(Path.Combine(saves, "Modded", "Profile1", "Saves")).FullName;
+    File.WriteAllText(Path.Combine(targetSlot, "progress.save"), "older modded data");
+    Assert(snapshotStore.TransferSlot(1, toModded: true) == 1 &&
+        File.ReadAllText(Path.Combine(targetSlot, "current_run.save")) == "second run" &&
+        !File.Exists(Path.Combine(targetSlot, "progress.save")) && File.ReadAllText(saveFile) == "second run" &&
+        snapshotStore.List().Any(item => item.Reason == "Before save slot transfer"), "Transfers replace just the selected slot after a durable backup");
+    Assert(snapshotStore.TransferSlot(3, toModded: false) == 0, "An empty source slot leaves existing saves intact");
     var edited = profiles.Edit(isolated.Id, "Renamed", false, true);
     Assert(edited.Id == isolated.Id && !edited.IsolateSaves && edited.IsolateMods &&
         new LaunchProfiles(profileSettings, profileData).Current() == edited && File.ReadAllText(saveFile) == "second run",

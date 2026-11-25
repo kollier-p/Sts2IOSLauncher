@@ -13,12 +13,14 @@ unsafe
     delegate* unmanaged[Cdecl]<int> versions = &Entry.BrowseVersions;
     delegate* unmanaged[Cdecl]<int> profiles = &Entry.BrowseProfiles;
     delegate* unmanaged[Cdecl]<int> snapshots = &Entry.BrowseSnapshots;
+    delegate* unmanaged[Cdecl]<nint, int> importSnapshot = &Entry.BeginSnapshotImport;
     delegate* unmanaged[Cdecl]<int> webDav = &Entry.BrowseWebDav;
     delegate* unmanaged[Cdecl]<int> steamCloud = &Entry.BrowseSteamCloud;
     delegate* unmanaged[Cdecl]<int> mods = &Entry.BrowseMods;
     delegate* unmanaged[Cdecl]<nint, int> importMod = &Entry.BeginModImport;
     delegate* unmanaged[Cdecl]<int> workshop = &Entry.BrowseWorkshop;
     delegate* unmanaged[Cdecl]<int> nexus = &Entry.BrowseNexus;
+    delegate* unmanaged[Cdecl]<int> launchOptions = &Entry.BrowseLaunchOptions;
     delegate* unmanaged[Cdecl]<int> cancel = &Entry.Cancel;
     delegate* unmanaged[Cdecl]<int> prepare = &Entry.Prepare;
     delegate* unmanaged[Cdecl]<int> forget = &Entry.ForgetSession;
@@ -31,11 +33,13 @@ unsafe
     Check(versions() == -1, "Version selection needs an initialized host");
     Check(profiles() == -1, "Profile selection needs an initialized host");
     Check(snapshots() == -1, "Save snapshots need an initialized host");
+    Check(importSnapshot(0) == -2, "Snapshot import validates the archive path");
     Check(webDav() == -1, "WebDAV needs an initialized host");
     Check(steamCloud() == -1, "Steam Cloud needs an initialized host");
     Check(mods() == -1 && importMod(0) == -2, "Mod management validates its native entry arguments");
     Check(workshop() == -1, "Workshop needs an initialized host");
     Check(nexus() == -1, "Nexus Mods needs an initialized host");
+    Check(launchOptions() == -1, "Launch settings need an initialized host");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
 

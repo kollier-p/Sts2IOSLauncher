@@ -18,6 +18,7 @@ public static class Entry
     static LaunchProfiles? profiles;
     static LaunchProfile? activeProfile;
     static LaunchProfilePaths? launchProfilePaths;
+    static GameLaunchOptions launchOptions = new();
     static string documents = "", managed = "";
     static CancellationTokenSource? active;
     static TaskCompletionSource<string>? prompt;
@@ -374,17 +375,53 @@ public static class Entry
         return new("installed", message);
     }
 
+    static GameLaunchOptionsStore OptionsStore(PayloadStore payloads) =>
+        new(Payload.SafePath(Path.GetDirectoryName(payloads.Root)!, "GameLaunchOptions.json"));
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BrowseLaunchOptions() => Start("Launch settings", new("settings", "Opening launch settings…"),
+        async (payloads, ct) =>
+        {
+            var options = OptionsStore(payloads);
+            var currentOptions = options.Load();
+            var action = await Ask("launch-options", "Game launch settings", ct,
+                [new("fps", "Frame rate limit", currentOptions.FrameLimit switch
+                    { null => "Game setting", 0 => "Uncapped", int fps => $"{fps} FPS" }),
+                 new("touch", "Touch as mouse", currentOptions.TouchAsMouse switch
+                    { null => "Game setting", true => "On", false => "Off" }),
+                 new("reset", "Restore game defaults", "Use the installed game's options")]);
+            if (action == "fps")
+            {
+                var value = await Ask("launch-fps", "Frame rate limit", ct,
+                    [new("default", "Game setting", ""), new("30", "30 FPS", ""),
+                     new("60", "60 FPS", ""), new("120", "120 FPS", ""), new("0", "Uncapped", "")]);
+                currentOptions = currentOptions with
+                {
+                    FrameLimit = int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var fps) ? fps : null
+                };
+            }
+            else if (action == "touch")
+            {
+                var value = await Ask("launch-touch", "Touch as mouse", ct,
+                    [new("default", "Game setting", ""), new("yes", "On", "Send mouse clicks for touch input"),
+                     new("no", "Off", "Send touch input directly")]);
+                currentOptions = currentOptions with { TouchAsMouse = value == "yes" ? true : value == "no" ? false : null };
+            }
+            else if (action == "reset") currentOptions = new();
+            else throw new InvalidDataException("Choose a launch setting.");
+            ct.ThrowIfCancellationRequested();
+            options.Save(currentOptions);
+            return new("idle", "Game launch settings saved.");
+        }) ? 0 : -1;
+
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseSnapshots() => Start("Save snapshots", new("snapshots", "Reading save snapshots…"),
         async (payloads, ct) =>
         {
-            var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
-            var saveDirectory = profiles!.SnapshotSaveDirectory(profile);
-            var support = Path.GetDirectoryName(payloads.Root)!;
-            var snapshotDirectory = Payload.SafePath(support, $"SaveSnapshots/{(profile.IsolateSaves ? profile.Id : "shared")}");
-            var snapshots = new SaveSnapshots(saveDirectory, snapshotDirectory);
+            var snapshots = ActiveSnapshots(payloads);
             var list = snapshots.List();
             var choices = new List<Choice> { new("new", "Create snapshot", "Back up the current saves and settings") };
+            choices.Add(new("transfer", "Transfer a save slot", "Copy between normal and modded saves"));
             choices.AddRange(list.Select(backup => new Choice(backup.Id,
                 backup.Created.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), $"{backup.Reason} · {backup.Files} files")));
             var selection = await Ask("snapshot", "Save snapshots", ct, choices.ToArray());
@@ -395,15 +432,65 @@ public static class Entry
                     ? new("idle", "There are no saves in this profile to back up.")
                     : new("idle", "Save snapshot created.");
             }
+            if (selection == "transfer") return await TransferSaveSlotAsync(snapshots, ct);
             if (!list.Any(backup => backup.Id == selection)) throw new InvalidDataException("Invalid snapshot selection.");
-            var action = await Ask("snapshot-restore", "Restore this save snapshot?", ct,
+            var action = await Ask("snapshot-action", "Save snapshot", ct,
                 [new("keep", "Keep current saves", "Return to the launcher"),
+                 new("export", "Export ZIP", "Save an Android-compatible snapshot in Launcher files"),
                  new("restore", "Back up and restore", "Save the current state before restoring this snapshot")]);
+            if (action == "export")
+            {
+                Publish(new("snapshots", "Verifying and exporting saves…"));
+                var destination = snapshots.ExportArchive(selection, Payload.SafePath(documents, "SaveExports"), ct);
+                return new("idle", $"Exported {Path.GetFileName(destination)} to Launcher files → SaveExports.");
+            }
             if (action != "restore") return new("idle", "Current saves kept.");
             Publish(new("snapshots", "Verifying and restoring saves…"));
             snapshots.Restore(selection, ct);
             return new("idle", "Save snapshot restored.");
         }) ? 0 : -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int BeginSnapshotImport(nint input)
+    {
+        var path = Str(input);
+        if (!Path.IsPathFullyQualified(path)) return -2;
+        return Start("Save snapshot import", new("snapshots", "Verifying save snapshot ZIP…"), (payloads, ct) =>
+        {
+            var imported = ActiveSnapshots(payloads).ImportArchive(path, ct);
+            return Task.FromResult(new State("idle", $"Imported a snapshot with {imported.Files} files. Select it in Snapshots and save slots to restore."));
+        }) ? 0 : -1;
+    }
+
+    static SaveSnapshots ActiveSnapshots(PayloadStore payloads)
+    {
+        var profile = activeProfile ?? throw new InvalidOperationException("Select a launch profile first.");
+        var saves = profiles!.SnapshotSaveDirectory(profile);
+        var support = Path.GetDirectoryName(payloads.Root)!;
+        var backups = Payload.SafePath(support, $"SaveSnapshots/{(profile.IsolateSaves ? profile.Id : "shared")}");
+        return new SaveSnapshots(saves, backups);
+    }
+
+    static async Task<State> TransferSaveSlotAsync(SaveSnapshots snapshots, CancellationToken ct)
+    {
+        var direction = await Ask("save-transfer", "Transfer a save slot", ct,
+            [new("modded", "Normal to modded", "Copy a normal save slot into the modded save tree"),
+             new("normal", "Modded to normal", "Copy a modded save slot into the normal save tree")]);
+        if (direction is not ("modded" or "normal")) throw new InvalidDataException("Invalid save transfer direction.");
+        var selection = await Ask("save-transfer-slot", "Choose the slot to copy", ct,
+            [new("1", "Profile 1", ""), new("2", "Profile 2", ""), new("3", "Profile 3", "")]);
+        if (!int.TryParse(selection, NumberStyles.None, CultureInfo.InvariantCulture, out var slot) || slot is < 1 or > 3)
+            throw new InvalidDataException("Invalid save slot.");
+        var destination = direction == "modded" ? "modded" : "normal";
+        var action = await Ask("save-transfer-confirm", $"Replace {destination} save slot {slot}?", ct,
+            [new("keep", "Keep current saves", "Return to the launcher"),
+             new("transfer", "Back up and replace", "The copied save needs its original game version and compatible mods")]);
+        if (action != "transfer") return new("idle", "Save slots kept.");
+        Publish(new("snapshots", "Backing up and copying the selected save slot…"));
+        var count = snapshots.TransferSlot(slot, direction == "modded", ct);
+        return count == 0 ? new("idle", "The selected source slot has no saves.") :
+            new("idle", $"Copied {count} files into {destination} slot {slot}.");
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int BrowseWebDav() => Start("WebDAV", new("webdav", "Opening WebDAV settings…"),
@@ -1024,6 +1111,7 @@ public static class Entry
         var mods = modLibrary.RuntimeDirectory();
         launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
         var support = Path.GetDirectoryName(payloads.Root)!;
+        launchOptions = OptionsStore(payloads).Load();
         WebDavAutomation? automation = null;
         if (WebDavVault.Load() is { Automation: WebDavAutomationMode.PullBeforePlay or WebDavAutomationMode.SyncBeforePlay } webDav)
         {
@@ -1116,6 +1204,7 @@ public static class Entry
             GameCompatibility.Apply(loadedGame ?? throw new InvalidOperationException(),
                 activeProfile ?? throw new InvalidOperationException(), launchProfilePaths ?? throw new InvalidOperationException(),
                 releaseInfo ?? throw new InvalidOperationException());
+            GameCompatibility.ApplyLaunchOptions(launchOptions);
             return 0;
         }
         catch (Exception error)

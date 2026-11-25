@@ -45,6 +45,32 @@ internal static class GameCompatibility
         if(releaseMethods.Length==1)Patch(releaseMethods[0],typeof(GameCompatibility).GetMethod(nameof(Release),Flags)!.MakeGenericMethod(releaseMethods[0].ReturnType),"postfix");
     }
 
+    public static void ApplyLaunchOptions(GameLaunchOptions options)
+    {
+        if (options.FrameLimit is null && options.TouchAsMouse is null) return;
+        var godot = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly => assembly.GetName().Name == "GodotSharp");
+        if (godot is null)
+        {
+            HostDiagnostics.Error("load Godot launch options", new FileNotFoundException("GodotSharp"));
+            return;
+        }
+        void Set(string type, string name, object value)
+        {
+            try
+            {
+                var property = godot.GetType(type, throwOnError: true)!.GetProperty(name, BindingFlags.Public | BindingFlags.Static)
+                    ?? throw new MissingMemberException(type, name);
+                property.SetValue(null, value);
+            }
+            catch (Exception error) when (error is TypeLoadException or MissingMemberException or TargetInvocationException or ArgumentException)
+            {
+                HostDiagnostics.Error($"set {type}.{name}", error);
+            }
+        }
+        if (options.FrameLimit is int fps) Set("Godot.Engine", "MaxFps", fps);
+        if (options.TouchAsMouse is bool touch) Set("Godot.Input", "EmulateMouseFromTouch", touch);
+    }
+
     static void PatchIsolatedSaves(Assembly game)
     {
         var provider = game.GetType("MegaCrit.Sts2.Core.Saves.UserDataPathProvider");

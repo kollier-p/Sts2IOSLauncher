@@ -15,13 +15,15 @@ using Command = int (*)(const char*);
 using Reply = int (*)(const char*,int64_t);
 using Simple = int (*)();
 using Status = int (*)(char*,int);
+enum class ArchivePicker { Game, Mod, Snapshot };
 static BOOL (*godotLaunch)(id,SEL,UIApplication*,NSDictionary*);
 static NSMutableDictionary<NSString*,NSValue*> *lifecycle;
 static BOOL started = NO;
 static InitHost initHost;
-static Command beginDownload, beginImport, beginModImport;
+static Command beginDownload, beginImport, beginModImport, beginSnapshotImport;
 static Reply reply;
-static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus, cancelOperation, prepareGame, forgetSession;
+static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
+    browseLaunchOptions, cancelOperation, prepareGame, forgetSession;
 static Status copyStatus;
 
 @interface LauncherChoices : UITableViewController
@@ -135,13 +137,13 @@ __attribute__((visibility("default")))
 @property(nonatomic,strong) UITextField *account,*password,*branch,*manifest,*beta;
 @property(nonatomic,strong) UILabel *message,*installation,*profile;
 @property(nonatomic,strong) UIProgressView *progress;
-@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files;
+@property(nonatomic,strong) UIButton *download,*play,*cancel,*saved,*forget,*importGame,*versions,*profiles,*snapshots,*importSnapshot,*webDav,*steamCloud,*mods,*importMod,*workshop,*nexus,*diagnostics,*files,*launchOptions;
 @property(nonatomic,copy) NSArray<UIStackView *> *sections;
 @property(nonatomic,strong) UISwitch *remember;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) UIViewController *prompt;
 @property(nonatomic,strong) NSURL *scopedArchive;
-@property(nonatomic,assign) BOOL pickingMod;
+@property(nonatomic,assign) ArchivePicker archivePicker;
 @property(nonatomic,assign) int64_t shownPromptId;
 @property(nonatomic,assign) BOOL initialized, initializing;
 @property(nonatomic,assign) BOOL waitingForSteam;
@@ -215,7 +217,8 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.importGame=[self button:@"Import game archive" action:@selector(importPressed)];
     self.versions=[self button:@"Installed versions" action:@selector(versionsPressed)];
     self.profiles=[self button:@"Launch profiles" action:@selector(profilesPressed)];
-    self.snapshots=[self button:@"Save snapshots" action:@selector(snapshotsPressed)];
+    self.snapshots=[self button:@"Snapshots and save slots" action:@selector(snapshotsPressed)];
+    self.importSnapshot=[self button:@"Import save snapshot" action:@selector(importSnapshotPressed)];
     self.webDav=[self button:@"WebDAV save sync" action:@selector(webDavPressed)];
     self.steamCloud=[self button:@"Steam Cloud saves" action:@selector(steamCloudPressed)];
     self.mods=[self button:@"Installed mods" action:@selector(modsPressed)];
@@ -225,6 +228,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.nexus=[self button:@"Nexus Mods" action:@selector(nexusPressed)];
     self.diagnostics=[self button:@"View logs" action:@selector(logPressed)];
     self.files=[self button:@"Launcher files" action:@selector(filesPressed)];
+    self.launchOptions=[self button:@"Game launch settings" action:@selector(launchOptionsPressed)];
     UIButton *about=[self button:@"About and updates" action:@selector(aboutPressed)];
     self.cancel=[self button:@"Cancel operation" action:@selector(cancelPressed)];
     self.progress=[UIProgressView new];self.message=[UILabel new];self.message.numberOfLines=0;self.message.text=@"Waiting for JIT permission";
@@ -240,9 +244,9 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [navigation addTarget:self action:@selector(sectionChanged:) forControlEvents:UIControlEventValueChanged];
     UIStackView *playSection=[self section:@[self.installation,self.profile,self.play,self.profiles,self.versions]];
     UIStackView *installSection=[self section:@[self.importGame,self.account,self.password,self.branch,self.manifest,self.beta,rememberRow,self.download,self.saved,self.forget]];
-    UIStackView *savesSection=[self section:@[self.snapshots,self.steamCloud,self.webDav]];
+    UIStackView *savesSection=[self section:@[self.snapshots,self.importSnapshot,self.steamCloud,self.webDav]];
     UIStackView *modsSection=[self section:@[self.mods,self.importMod,self.workshop,workshopWebsite,self.nexus]];
-    UIStackView *toolsSection=[self section:@[self.files,self.diagnostics,about]];
+    UIStackView *toolsSection=[self section:@[self.launchOptions,self.files,self.diagnostics,about]];
     self.sections=@[playSection,installSection,savesSection,modsSection,toolsSection];
     UIStackView *stack=[self section:@[heading,navigation,playSection,installSection,savesSection,modsSection,toolsSection,self.progress,self.message,self.cancel]];
     stack.spacing=16;
@@ -255,7 +259,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [NSLayoutConstraint activateConstraints:@[[scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],[scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],[scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],[scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],[scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-20],[stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],[stack.widthAnchor constraintLessThanOrEqualToConstant:680],preferredWidth]];
     self.download.enabled=self.play.enabled=self.cancel.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=NO;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=NO;
-    self.files.enabled=NO;
+    self.files.enabled=self.launchOptions.enabled=self.importSnapshot.enabled=NO;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 }
 - (void)tick {
@@ -281,10 +285,12 @@ static void forward(id service,SEL selector,UIApplication *application) {
                get("BeginImport",(void**)&beginImport)==0 && get("BrowseVersions",(void**)&browseVersions)==0 &&
                get("BrowseProfiles",(void**)&browseProfiles)==0 &&
                get("BrowseSnapshots",(void**)&browseSnapshots)==0 &&
+               get("BeginSnapshotImport",(void**)&beginSnapshotImport)==0 &&
                get("BrowseWebDav",(void**)&browseWebDav)==0 &&
                get("BrowseSteamCloud",(void**)&browseSteamCloud)==0 &&
                get("BrowseMods",(void**)&browseMods)==0 && get("BeginModImport",(void**)&beginModImport)==0 &&
                get("BrowseWorkshop",(void**)&browseWorkshop)==0 && get("BrowseNexus",(void**)&browseNexus)==0 &&
+               get("BrowseLaunchOptions",(void**)&browseLaunchOptions)==0 &&
                get("Reply",(void**)&reply)==0 && get("Cancel",(void**)&cancelOperation)==0 &&
                get("ForgetSession",(void**)&forgetSession)==0 && get("Prepare",(void**)&prepareGame)==0 && get("CopyStatus",(void**)&copyStatus)==0)
                 rc=initHost(payload.UTF8String,docs.UTF8String,managed.UTF8String);
@@ -316,10 +322,10 @@ static void forward(id service,SEL selector,UIApplication *application) {
     self.profile.text=profile?[NSString stringWithFormat:@"Profile: %@",profile]:@"Launch profile unavailable";
     self.download.enabled=self.saved.enabled=self.forget.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.play.enabled=idle && installed!=nil && profile!=nil;
-    self.snapshots.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
+    self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil;
     self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
     self.diagnostics.enabled=idle;
-    self.files.enabled=idle;
+    self.files.enabled=self.launchOptions.enabled=idle;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
     double total=[state[@"Total"] doubleValue],done=[state[@"Completed"] doubleValue],speed=[state[@"Speed"] doubleValue];
@@ -411,6 +417,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
 - (void)modsPressed { [self.view endEditing:YES];if(browseMods()!=0)[self showError:@"Another operation is active."]; }
 - (void)workshopPressed { [self.view endEditing:YES];if(browseWorkshop()!=0)[self showError:@"Another operation is active."]; }
 - (void)nexusPressed { [self.view endEditing:YES];if(browseNexus()!=0)[self showError:@"Another operation is active."]; }
+- (void)launchOptionsPressed { if(browseLaunchOptions()!=0)[self showError:@"Another operation is active."]; }
 - (void)filesPressed {
     NSURL *documents=[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     UIViewController *browser=launcherFileBrowser(documents);
@@ -475,18 +482,24 @@ static void forward(id service,SEL selector,UIApplication *application) {
     [self.application openURL:url options:@{} completionHandler:nil];
 }
 - (void)importModPressed {
-    [self selectArchiveForMod:YES];
+    [self selectArchive:ArchivePicker::Mod];
 }
 - (void)importPressed {
-    [self selectArchiveForMod:NO];
+    [self selectArchive:ArchivePicker::Game];
 }
-- (void)selectArchiveForMod:(BOOL)mod {
+- (void)importSnapshotPressed {
+    [self selectArchive:ArchivePicker::Snapshot];
+}
+- (void)selectArchive:(ArchivePicker)kind {
     [self.view endEditing:YES];
-    self.pickingMod=mod;
-    NSMutableArray<UTType *> *types=[NSMutableArray arrayWithArray:@[UTTypeZIP,UTTypeArchive]];
-    for(NSString *extension in @[@"7z",@"rar",@"tar",@"gz",@"tgz",@"bz2",@"tbz",@"tbz2",@"xz",@"txz",@"zst",@"tzst"]){
-        UTType *type=[UTType typeWithFilenameExtension:extension];
-        if(type && ![types containsObject:type]) [types addObject:type];
+    self.archivePicker=kind;
+    NSMutableArray<UTType *> *types=[NSMutableArray arrayWithObject:UTTypeZIP];
+    if(kind!=ArchivePicker::Snapshot){
+        [types addObject:UTTypeArchive];
+        for(NSString *extension in @[@"7z",@"rar",@"tar",@"gz",@"tgz",@"bz2",@"tbz",@"tbz2",@"xz",@"txz",@"zst",@"tzst"]){
+            UTType *type=[UTType typeWithFilenameExtension:extension];
+            if(type && ![types containsObject:type]) [types addObject:type];
+        }
     }
     UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
     picker.delegate=self;
@@ -494,11 +507,14 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *archive=urls.firstObject;
+    if(!archive)return;
     if([archive startAccessingSecurityScopedResource])self.scopedArchive=archive;
-    Command importer=self.pickingMod?beginModImport:beginImport;
+    Command importer=beginImport;
+    if(self.archivePicker==ArchivePicker::Mod) importer=beginModImport;
+    if(self.archivePicker==ArchivePicker::Snapshot) importer=beginSnapshotImport;
     if(importer(archive.fileSystemRepresentation)!=0){
         [self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;
-        [self showError:self.pickingMod?@"Unable to open the selected mod archive.":@"Unable to open the selected game archive."];
+        [self showError:@"Unable to open the selected archive."];
     }
 }
 - (void)downloadPressed { [self startDownload:NO]; }

@@ -45,6 +45,49 @@ def verify_framework(app, name, *symbols):
     verify_symbols(executable, *symbols)
 
 
+def verify_linked_libraries(app, executable):
+    frameworks = app / "Frameworks"
+    images = [executable, *sorted(frameworks.glob("*.dylib"))]
+    for framework in sorted(frameworks.glob("*.framework")):
+        metadata = plistlib.loads((framework / "Info.plist").read_bytes())
+        images.append(framework / metadata["CFBundleExecutable"])
+    bundled = {image.resolve() for image in images}
+
+    def expand(path, image):
+        for prefix, directory in (("@loader_path", image.parent), ("@executable_path", executable.parent)):
+            if path == prefix:
+                return directory
+            if path.startswith(prefix + "/"):
+                return directory / path[len(prefix) + 1:]
+        return pathlib.Path(path) if path.startswith("/") else None
+
+    def runpaths(image):
+        commands = inspect("otool", "-l", image)
+        return [folder for path in re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.+?) \(offset \d+\)", commands)
+                if (folder := expand(path, image)) is not None]
+
+    app_runpaths = runpaths(executable)
+    for image in images:
+        search = app_runpaths if image == executable else [*runpaths(image), *app_runpaths]
+        install_names = [] if image == executable else inspect("otool", "-D", image).splitlines()[1:]
+        for line in inspect("otool", "-L", image).splitlines()[1:]:
+            dependency = line.strip().partition(" (compatibility version ")[0]
+            if not dependency or dependency in install_names or dependency.startswith(("/usr/lib/", "/System/Library/Frameworks/")):
+                continue
+            if dependency.startswith("@rpath/"):
+                relative = dependency[len("@rpath/"):]
+                if any((folder / relative).resolve() in bundled for folder in search):
+                    continue
+                if re.fullmatch(r"libswift[A-Za-z0-9_]+\.dylib", relative) and pathlib.Path("/usr/lib/swift") in search:
+                    continue
+            else:
+                target = expand(dependency, image)
+                if target is not None and target.resolve() in bundled:
+                    continue
+            raise SystemExit(f"Unresolved bundled dependency for {image.name}: {dependency}")
+    return len(images)
+
+
 def validate(app, extensions, fixtures):
     info = plistlib.loads((app / "Info.plist").read_bytes())
     binary = app / info["CFBundleExecutable"]
@@ -82,9 +125,10 @@ def validate(app, extensions, fixtures):
         if item.name.lower() in {"sts2.dll", "0harmony.dll", "slaythespire2.pck", "release_info.json",
                                  "embedded.mobileprovision"} or item.is_symlink():
             raise SystemExit(f"Unexpected entry in pre-IPA app: {item}")
+    linked_images = verify_linked_libraries(app, binary)
     return {"bundle": info["CFBundleIdentifier"], "minimum_os": info["MinimumOSVersion"],
             "extensions": extensions, "extension_fixtures": fixtures, "architecture": "arm64", "platform": "iPhoneOS",
-            "status": "compiled and staged; device untested"}
+            "linked_images": linked_images, "status": "compiled and staged; device untested"}
 
 
 if __name__ == "__main__":
