@@ -6,6 +6,10 @@ on:
         description: "Build and verify an extension-enabled IPA on the runner for authorized evaluation"
         type: boolean
         default: false
+      upload_extension_ipa:
+        description: "Publish the unsigned FMOD and Spine IPA as a downloadable artifact"
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -14,3 +18,4 @@ jobs:
     with:
       include_extensions: ${{ inputs.include_extensions }}
       package_ipa: true
+      upload_extension_ipa: ${{ inputs.upload_extension_ipa }}

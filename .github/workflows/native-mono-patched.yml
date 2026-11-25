@@ -8,6 +8,9 @@ on:
       package_ipa:
         type: boolean
         default: false
+      upload_extension_ipa:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       include_extensions:
@@ -43,6 +46,11 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
+      - name: Check IPA upload inputs
+        if: inputs.upload_extension_ipa == true && (inputs.include_extensions != true || inputs.package_ipa != true)
+        run: |
+          echo "::error::The extension IPA upload requires include_extensions and package_ipa."
+          exit 1
       - uses: actions/checkout@v4
       - run: python3 scripts/build_native_mono.py --patched
       - name: Compile memory alias implementation
@@ -114,6 +122,14 @@ jobs:
         with:
           name: STS2IOSLauncher-diagnostic-ipa
           path: dist/STS2IOSLauncher.ipa
+          if-no-files-found: error
+      - name: Upload extension-enabled IPA
+        if: inputs.upload_extension_ipa == true && inputs.include_extensions == true && inputs.package_ipa == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: STS2IOSLauncher-unsigned-ipa
+          path: dist/STS2IOSLauncher.ipa
+          compression-level: 0
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

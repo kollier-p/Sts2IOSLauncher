@@ -9,6 +9,7 @@
 #include "LauncherFiles.mm"
 
 extern "C" int csops(pid_t,unsigned int,void*,size_t);
+extern "C" int sts2_extensions_available();
 using InitRuntime = int (*)(const char*,const char*,const char*);
 using GetDelegate = int (*)(const char*,void**);
 using InitHost = int (*)(const char*,const char*,const char*);
@@ -531,6 +532,7 @@ static void forward(id service,SEL selector,UIApplication *application) {
     NSString *commit=info[@"STS2GitRevision"]?:@"";
     if(commit.length>12)commit=[commit substringToIndex:12];
     NSString *message=commit.length?[NSString stringWithFormat:@"Version %@ · %@",version,commit]:[NSString stringWithFormat:@"Version %@",version];
+    if(sts2_extensions_available())message=[message stringByAppendingString:@"\n\nFMOD by Firelight Technologies Pty Ltd."];
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"STS2 Launcher" message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Check for updates" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
         [self checkForUpdates:version];

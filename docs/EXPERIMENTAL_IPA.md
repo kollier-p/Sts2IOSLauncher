@@ -4,9 +4,9 @@ Automatic CI validates the ARM64 iOS app and unsigned IPA packaging. The diagnos
 
 To build with FMOD and Spine after confirming the applicable licenses, use Actions > Native Godot pre-IPA build > Run workflow > include_extensions, or set the repository Actions variable INCLUDE_NATIVE_EXTENSIONS=true to enable that build on pushes. The repository does not include game files or redistribute extension source archives itself. Check the applicable FMOD and Spine terms before sharing an extension-inclusive binary.
 
-The extension-enabled build stages ARM64 FMOD and Spine frameworks inside the `.app`. At launch the verified Steam pack is cloned or copied, C# script placeholders are added, and its descriptors point Godot to those frameworks. The workflow validates the extension-enabled app on the runner and keeps the extension binaries out of public artifacts.
+The extension-enabled build stages ARM64 FMOD and Spine frameworks inside the `.app`. At launch the verified Steam pack is cloned or copied, C# script placeholders are added, and its descriptors point Godot to those frameworks. The bundle includes the Spine runtime license and the launcher About screen credits FMOD.
 
-The automatic build uploads the diagnostic `.app` as a tar archive and checks IPA packaging on the runner. **Build IPA** uploads the unsigned diagnostic IPA by default. With `include_extensions` enabled, it verifies the IPA with both native extensions and uploads a checksum report. The extension-enabled app and IPA stay on the runner.
+The automatic build uploads the diagnostic `.app` as a tar archive and checks IPA packaging on the runner. **Build IPA** uploads the unsigned diagnostic IPA by default. With `include_extensions` enabled, it verifies the IPA with both native extensions and uploads a checksum report. Enable `upload_extension_ipa` on the same run to publish the extension-enabled IPA as a downloadable artifact.
 
 Automatic CI also builds an app with two small test libraries to check the extension framework layout, install names and exported symbols. The test app disables Play and stays on the runner. Its validation report accompanies the diagnostic app artifact.
 

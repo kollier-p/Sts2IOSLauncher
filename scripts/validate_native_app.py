@@ -119,6 +119,8 @@ def validate(app, extensions, fixtures):
         imports = inspect("nm", "-gu", fmod).split()
         if "_load_all_fmod_plugins" not in imports:
             raise SystemExit(f"Missing FMOD host callback import: {fmod}")
+        if extensions and not (app / "Frameworks" / f"{SPINE_NAME}.framework" / "Spine-LICENSE.txt").is_file():
+            raise SystemExit("Missing Spine runtime license")
     elif any((app / "Frameworks" / f"{name}.framework").exists() for name in (FMOD_NAME, SPINE_NAME)):
         raise SystemExit("Unexpected extension frameworks in the diagnostic app")
     for item in app.rglob("*"):
