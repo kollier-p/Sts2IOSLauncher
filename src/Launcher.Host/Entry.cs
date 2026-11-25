@@ -1653,11 +1653,22 @@ public static class Entry
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    public static int SetGameParked(int parked)
+    public static int PrepareGameShutdown()
     {
-        GameSession.SetParked(parked != 0);
-        if (parked != 0)
-            Publish(new("idle", "Game paused. Reopen the app to change versions, mods, or saves."));
+        GameKeyboard.Detach();
+        GameRenderWarmup.EndSession();
+        HostDiagnostics.Stage("closing game engine");
+        return 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int GameDidQuit()
+    {
+        loadedGame = null;
+        launchProfilePaths = null;
+        assemblyRoot = adapterRoot = releaseInfo = null;
+        HostDiagnostics.Stage("game engine closed");
+        Publish(new("idle", "Game closed. You can change mods, saves, and settings here."));
         return 0;
     }
 

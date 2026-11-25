@@ -143,7 +143,6 @@ internal static class GameCompatibility
         try
         {
             var tree = godot.GetType("Godot.SceneTree", throwOnError: true)!;
-            GameSession.Attach(menu, godot, game);
             var quit = tree.GetMethod("Quit", [typeof(int)])!;
             Patch(quit, typeof(GameSession).GetMethod(nameof(GameSession.SceneQuitPrefix))!);
         }

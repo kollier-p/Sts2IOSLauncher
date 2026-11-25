@@ -13,6 +13,7 @@ internal sealed class GameRenderWarmup
 
     static readonly List<object> RetainedAssets = [];
     static bool started;
+    static GameRenderWarmup? activePass;
     internal static string? CatalogDirectory { private get; set; }
     internal static bool Extended { private get; set; }
 
@@ -75,8 +76,16 @@ internal sealed class GameRenderWarmup
             HostDiagnostics.Stage("game main menu ready for preload");
             var warmup = new GameRenderWarmup(menu, godot);
             warmup.processFrame.AddEventHandler(warmup.tree, warmup.callback);
+            activePass = warmup;
         }
         catch (Exception error) { HostDiagnostics.Error("schedule startup preload", error); }
+    }
+
+    internal static void EndSession()
+    {
+        activePass?.Finish("game quit");
+        RetainedAssets.Clear();
+        CatalogDirectory = null;
     }
 
     Type Godot(string type) => godot.GetType("Godot." + type, throwOnError: true)!;
@@ -348,6 +357,7 @@ internal sealed class GameRenderWarmup
 
     void Finish(string? reason = null, bool retryExtended = true)
     {
+        activePass = null;
         try
         {
             processFrame.RemoveEventHandler(tree, callback);

@@ -9,9 +9,9 @@
 @interface LauncherGameKeys ()
 @property(nonatomic,strong) UIButton *toggle;
 @property(nonatomic,strong) UISegmentedControl *pages;
-@property(nonatomic,strong) UIStackView *panel,*rows;
+@property(nonatomic,strong) UIStackView *content,*panel,*rows;
 @property(nonatomic,copy) NSArray<UIButton *> *modifierButtons;
-@property(nonatomic,strong) NSLayoutConstraint *top,*width;
+@property(nonatomic,strong) NSLayoutConstraint *top,*collapsedWidth,*expandedWidth,*maximumWidth;
 @property(nonatomic,weak) UIWindow *gameWindow;
 @property(nonatomic,assign) int modifierMask;
 @property(nonatomic,assign) CGFloat dragStart;
@@ -73,7 +73,6 @@
     self.panel=[[UIStackView alloc] initWithArrangedSubviews:@[self.pages,modifierRow,self.rows]];
     self.panel.axis=UILayoutConstraintAxisVertical;
     self.panel.spacing=6;
-    self.panel.hidden=YES;
 
     UIView *handle=[UIView new];
     handle.translatesAutoresizingMaskIntoConstraints=NO;
@@ -84,7 +83,8 @@
         [self.toggle.trailingAnchor constraintEqualToAnchor:handle.trailingAnchor],
         [self.toggle.bottomAnchor constraintEqualToAnchor:handle.bottomAnchor]
     ]];
-    UIStackView *content=[[UIStackView alloc] initWithArrangedSubviews:@[handle,self.panel]];
+    UIStackView *content=[[UIStackView alloc] initWithArrangedSubviews:@[handle]];
+    self.content=content;
     content.axis=UILayoutConstraintAxisVertical;
     content.spacing=6;
     content.translatesAutoresizingMaskIntoConstraints=NO;
@@ -92,11 +92,12 @@
     [window addSubview:self];
     UILayoutGuide *safe=window.safeAreaLayoutGuide;
     self.top=[self.topAnchor constraintEqualToAnchor:safe.topAnchor constant:76];
-    self.width=[self.widthAnchor constraintEqualToConstant:52];
-    self.width.priority=UILayoutPriorityDefaultHigh;
+    self.collapsedWidth=[self.widthAnchor constraintEqualToConstant:52];
+    self.expandedWidth=[self.widthAnchor constraintEqualToConstant:366];
+    self.expandedWidth.priority=UILayoutPriorityDefaultHigh;
+    self.maximumWidth=[self.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16];
     [NSLayoutConstraint activateConstraints:@[
-        self.top,self.width,[self.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
-        [self.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
+        self.top,self.collapsedWidth,[self.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
         [content.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
         [content.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-4],
         [content.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:4],
@@ -105,15 +106,23 @@
 }
 
 - (void)togglePanel {
-    self.panel.hidden=!self.panel.hidden;
-    BOOL collapsed=self.panel.hidden;
-    self.width.constant=collapsed?52:366;
+    BOOL collapsed=self.panel.superview!=nil;
+    if(collapsed){
+        [self.content removeArrangedSubview:self.panel];
+        [self.panel removeFromSuperview];
+        [NSLayoutConstraint deactivateConstraints:@[self.expandedWidth,self.maximumWidth]];
+        self.collapsedWidth.active=YES;
+        [self resetModifiers];
+    }else{
+        self.collapsedWidth.active=NO;
+        [NSLayoutConstraint activateConstraints:@[self.expandedWidth,self.maximumWidth]];
+        [self.content addArrangedSubview:self.panel];
+        [self showKeys];
+    }
     UIButtonConfiguration *style=self.toggle.configuration;
     style.image=[UIImage systemImageNamed:collapsed?@"keyboard":@"keyboard.chevron.compact.down"];
     self.toggle.configuration=style;
     self.toggle.accessibilityLabel=collapsed?@"Show game keyboard":@"Minimize game keyboard";
-    if(collapsed)[self resetModifiers];
-    else [self showKeys];
     [self.gameWindow layoutIfNeeded];
     [self moveToTop:self.top.constant];
 }

@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <ImageIO/ImageIO.h>
 #import <objc/runtime.h>
@@ -15,15 +16,14 @@ using GetDelegate = int (*)(const char*,void**);
 using InitHost = int (*)(const char*,const char*,const char*);
 using Command = int (*)(const char*);
 using KeyCommand = int (*)(const char*,int);
-using GameVisibility = int (*)(int);
 using Reply = int (*)(const char*,int64_t);
 using Simple = int (*)();
 using Status = int (*)(char*,int);
 enum class ArchivePicker { Game, Mod, Snapshot };
 static BOOL (*godotLaunch)(id,SEL,UIApplication*,NSDictionary*);
 static NSMutableDictionary<NSString*,NSValue*> *lifecycle;
-static BOOL started = NO;
-static BOOL gameVisible = NO, returningToLauncher = NO;
+enum class GameState { Ready, Running, Closing, Closed };
+static GameState gameState = GameState::Ready;
 static UIWindow *gameWindow;
 static void (*audioInterruption)(id,SEL,NSNotification *);
 static InitHost initHost;
@@ -32,8 +32,7 @@ static Reply reply;
 static Simple browseVersions, browseProfiles, browseSnapshots, browseWebDav, browseSteamCloud, browseMods, browseWorkshop, browseNexus,
     browseLaunchOptions, cancelOperation, prepareGame, prepareSafeGame, signInSteam, forgetSession;
 static Simple beginGameBackgroundSync, gameBackgroundSyncActive, cancelGameBackgroundSync;
-static Simple releaseGameKeys;
-static GameVisibility setGameParked;
+static Simple releaseGameKeys, prepareGameShutdown, gameDidQuit;
 static KeyCommand sendGameKey;
 static UIBackgroundTaskIdentifier gameSyncTask=UIBackgroundTaskInvalid;
 static NSTimer *gameSyncTimer;
@@ -78,7 +77,8 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
         {"PrepareSafe", (void **)&prepareSafeGame},
         {"SendGameKey", (void **)&sendGameKey},
         {"ReleaseGameKeys", (void **)&releaseGameKeys},
-        {"SetGameParked", (void **)&setGameParked},
+        {"PrepareGameShutdown", (void **)&prepareGameShutdown},
+        {"GameDidQuit", (void **)&gameDidQuit},
         {"CopyStatus", (void **)&copyStatus},
     };
     for (const auto &binding : bindings) {
@@ -335,6 +335,10 @@ __attribute__((visibility("default")))
 @end
 static LauncherGate *gate;
 static LauncherGameKeys *gameKeys;
+
+@protocol LauncherGodotView
+- (void)stopRendering;
+@end
 static BOOL delayedLaunch(id service,SEL selector,UIApplication *application,NSDictionary *options) {
     gate=[LauncherGate new];gate.service=service;gate.application=application;gate.options=options;
     gate.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -362,22 +366,23 @@ static void startGameSync(UIApplication *application) {
         if(!gameBackgroundSyncActive())endGameSync(application,NO);
     }];
 }
+static void callGodotLifecycle(id service,SEL selector,UIApplication *application) {
+    auto original=(void(*)(id,SEL,UIApplication*))lifecycle[NSStringFromSelector(selector)].pointerValue;
+    if(original)original(service,selector,application);
+}
 static void forward(id service,SEL selector,UIApplication *application) {
-    if(!started)return;
-    if(!gameVisible && selector!=@selector(applicationWillTerminate:) &&
-        selector!=@selector(applicationDidReceiveMemoryWarning:))return;
+    if(gameState!=GameState::Running)return;
     if(selector==@selector(applicationWillResignActive:)){
         releaseGameKeys();
         [gameKeys resetModifiers];
     }
     if(selector==@selector(applicationWillEnterForeground:) || selector==@selector(applicationWillTerminate:))
         endGameSync(application,YES);
-    auto original=(void(*)(id,SEL,UIApplication*))lifecycle[NSStringFromSelector(selector)].pointerValue;
-    if(original)original(service,selector,application);
+    callGodotLifecycle(service,selector,application);
     if(selector==@selector(applicationDidEnterBackground:))startGameSync(application);
 }
 static void forwardAudioInterruption(id service,SEL selector,NSNotification *notification) {
-    if(gameVisible && audioInterruption)audioInterruption(service,selector,notification);
+    if(gameState==GameState::Running && audioInterruption)audioInterruption(service,selector,notification);
 }
 
 extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launcher() {
@@ -385,30 +390,46 @@ extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launch
         dispatch_async(dispatch_get_main_queue(), ^{sts2_return_to_launcher();});
         return 1;
     }
-    if(!started || !gate || !gameWindow)return 0;
-    if(!gameVisible || returningToLauncher)return 1;
-    returningToLauncher=YES;
+    if(gameState==GameState::Closing || gameState==GameState::Closed)return 1;
+    if(gameState!=GameState::Running || !gate || !gameWindow ||
+        !lifecycle[NSStringFromSelector(@selector(applicationWillTerminate:))].pointerValue)return 0;
+    gameState=GameState::Closing;
     dispatch_async(dispatch_get_main_queue(), ^{
-        forward(gate.service,@selector(applicationWillResignActive:),gate.application);
-        setGameParked(1);
-        gameVisible=NO;
+        UIViewController *controller=gameWindow.rootViewController;
+        UIView *view=controller.viewIfLoaded;
+        callGodotLifecycle(gate.service,@selector(applicationWillResignActive:),gate.application);
+        if([view respondsToSelector:@selector(stopRendering)])[(id<LauncherGodotView>)view stopRendering];
+        prepareGameShutdown();
+        [gameKeys removeFromSuperview];
+        gameKeys=nil;
+        // The template's termination callback runs apple_embedded_finish and
+        // tears down Godot's main loop, audio, renderers, and game resources.
+        callGodotLifecycle(gate.service,@selector(applicationWillTerminate:),gate.application);
+        [NSNotificationCenter.defaultCenter removeObserver:gate.service
+            name:AVAudioSessionInterruptionNotification object:AVAudioSession.sharedInstance];
         [gate.service setValue:gate.window forKey:@"window"];
         [gate.window makeKeyAndVisible];
         gameWindow.hidden=YES;
+        gameWindow.rootViewController=nil;
+        // The template retains this controller internally. Drop its GDTView so
+        // it releases UIKit rendering and motion resources after engine cleanup.
+        controller.view=[UIView new];
+        gameWindow=nil;
+        gameState=GameState::Closed;
+        gameDidQuit();
+        startGameSync(gate.application);
         [gate startPolling];
         [gate tick];
-        startGameSync(gate.application);
-        returningToLauncher=NO;
     });
     return 1;
 }
 
 extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_ready() {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if(!gameWindow || gameKeys)return;
+        if(gameState!=GameState::Running || !gameWindow || gameKeys)return;
         gameKeys=[LauncherGameKeys new];
         gameKeys.sendKey=^(NSString *key,int modifiers){
-            if(gameVisible && !returningToLauncher)sendGameKey(key.UTF8String,modifiers);
+            if(gameState==GameState::Running)sendGameKey(key.UTF8String,modifiers);
         };
         [gameKeys installInWindow:gameWindow];
     });
@@ -538,6 +559,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 - (void)tick {
+    if(gameState==GameState::Running || gameState==GameState::Closing)return;
     if(!self.initialized){
         if(self.initializing || self.application.applicationState!=UIApplicationStateActive)return;
         uint32_t flags=0;
@@ -584,7 +606,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
         [@[@"confirm",@"code"] containsObject:state[@"Prompt"]]);
     if(!self.canContinueInBackground) [self endLauncherBackgroundTask];
     BOOL idle=[@[@"idle",@"error",@"installed"] containsObject:stage];
-    BOOL parked=started && !gameVisible;
+    BOOL closed=gameState==GameState::Closed;
     NSString *installed=[state[@"Installed"] isKindOfClass:NSString.class]?state[@"Installed"]:nil;
     NSString *profile=[state[@"Profile"] isKindOfClass:NSString.class]?state[@"Profile"]:nil;
     self.installation.text=installed?[NSString stringWithFormat:@"Installed: %@",installed]:@"No game installed";
@@ -592,24 +614,25 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     NSString *steamAccount=[state[@"SteamAccount"] isKindOfClass:NSString.class]?state[@"SteamAccount"]:nil;
     self.steamAccount.text=steamAccount?[NSString stringWithFormat:@"Steam: %@%@",steamAccount,
         [state[@"SteamSessionTemporary"] boolValue]?@" (saved for this launch only)":@""]:@"Steam: Signed out";
-    self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle && !parked;
+    self.download.enabled=self.importGame.enabled=self.versions.enabled=self.profiles.enabled=idle;
     self.forget.enabled=idle && steamAccount!=nil;
     self.forget.hidden=steamAccount==nil;
     self.steamSignIn.enabled=idle;
     self.steamSignIn.hidden=steamAccount!=nil;
-    self.play.enabled=idle && (parked || (installed!=nil && profile!=nil));
-    NSString *playTitle=parked?@"Resume game":@"Play installed game";
+    self.play.enabled=idle && !closed && installed!=nil && profile!=nil;
+    NSString *playTitle=closed?@"Reopen app to play":@"Play installed game";
     UIButtonConfiguration *playStyle=self.play.configuration;
     if(![playStyle.title isEqualToString:playTitle]){
         playStyle.title=playTitle;
         self.play.configuration=playStyle;
     }
-    self.safePlay.enabled=self.play.enabled && !parked;
-    self.safePlay.hidden=parked;
-    self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil && !parked;
-    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil && !parked;
+    self.safePlay.enabled=self.play.enabled;
+    self.safePlay.hidden=closed;
+    BOOL syncingSaves=gameSyncTask!=UIBackgroundTaskInvalid;
+    self.snapshots.enabled=self.importSnapshot.enabled=self.webDav.enabled=self.steamCloud.enabled=idle && profile!=nil && !syncingSaves;
+    self.mods.enabled=self.importMod.enabled=self.workshop.enabled=self.nexus.enabled=idle && profile!=nil;
     self.diagnostics.enabled=idle;
-    self.files.enabled=idle && !parked;
+    self.files.enabled=idle && !syncingSaves;
     self.launchOptions.enabled=idle;
     self.cancel.enabled=!idle;
     if(idle && self.scopedArchive){[self.scopedArchive stopAccessingSecurityScopedResource];self.scopedArchive=nil;}
@@ -637,7 +660,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
     if(self.prompt){[self.prompt dismissViewControllerAnimated:YES completion:nil];self.prompt=nil;}
     if(self.workshopPane)[self.workshopPane showStatus:message progress:total>0?done/total:-1 busy:!idle];
     if(self.installedModsPane)[self.installedModsPane showStatus:message];
-    if([stage isEqual:@"ready"]){
+    if([stage isEqual:@"ready"] && gameState==GameState::Ready){
         if(self.application.applicationState!=UIApplicationStateActive)return;
         [self.timer invalidate];self.message.text=@"Starting Godot…";
         NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
@@ -645,8 +668,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
         UIWindow *old=self.window;BOOL ok=godotLaunch(self.service,@selector(application:didFinishLaunchingWithOptions:),self.application,self.options);
         if(ok){
             gameWindow=[self.service valueForKey:@"window"];
-            started=YES;
-            gameVisible=YES;
+            gameState=GameState::Running;
             forward(self.service,@selector(applicationDidBecomeActive:),self.application);
             old.hidden=YES;
         }
@@ -903,19 +925,12 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
 }
 - (void)playPressed {
     [self.view endEditing:YES];
-    if(started && !gameVisible && gameWindow){
-        [self.timer invalidate];
-        endGameSync(self.application,YES);
-        [self.service setValue:gameWindow forKey:@"window"];
-        [gameWindow makeKeyAndVisible];
-        self.window.hidden=YES;
-        gameVisible=YES;
-        forward(self.service,@selector(applicationDidBecomeActive:),self.application);
-        setGameParked(0);
-        return;
-    }
+    if(gameState!=GameState::Ready)return;
     if(prepareGame()!=0)[self showError:@"Another operation is active."];
 }
-- (void)safePlayPressed { [self.view endEditing:YES];if(prepareSafeGame()!=0)[self showError:@"Another operation is active."]; }
+- (void)safePlayPressed {
+    [self.view endEditing:YES];
+    if(gameState==GameState::Ready && prepareSafeGame()!=0)[self showError:@"Another operation is active."];
+}
 - (void)cancelPressed {cancelOperation();}
 @end

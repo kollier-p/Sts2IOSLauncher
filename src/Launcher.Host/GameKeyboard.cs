@@ -48,6 +48,12 @@ internal sealed class GameKeyboard
     internal static void Attach(object menu, Assembly godot) => current = new(menu, godot);
     internal static bool Send(string key, int modifiers) => current?.Enqueue(key, modifiers) == true;
     internal static void Reset() => current?.ReleaseAll();
+    internal static void Detach()
+    {
+        var keyboard = current;
+        current = null;
+        keyboard?.ReleaseAll();
+    }
 
     bool Enqueue(string key, int modifierMask)
     {

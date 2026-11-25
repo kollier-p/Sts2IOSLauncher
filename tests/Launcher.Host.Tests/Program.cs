@@ -36,7 +36,8 @@ unsafe
     delegate* unmanaged[Cdecl]<int> startHooks = &Entry.StartGameHooks;
     delegate* unmanaged[Cdecl]<nint, int, int> sendGameKey = &Entry.SendGameKey;
     delegate* unmanaged[Cdecl]<int> releaseGameKeys = &Entry.ReleaseGameKeys;
-    delegate* unmanaged[Cdecl]<int, int> setGameParked = &Entry.SetGameParked;
+    delegate* unmanaged[Cdecl]<int> prepareGameShutdown = &Entry.PrepareGameShutdown;
+    delegate* unmanaged[Cdecl]<int> gameDidQuit = &Entry.GameDidQuit;
 
     Check(prepare() == -1, "An uninitialized host rejects launch");
     Check(prepareSafe() == -1, "An uninitialized host rejects a safe launch");
@@ -55,7 +56,7 @@ unsafe
     Check(launchOptions() == -1, "Launch settings need an initialized host");
     Check(beginGameSync() == -1 && gameSyncActive() == 0, "Background save sync requires the opt-in game launch context");
     Check(startHooks() == -1, "Compatibility requires a prepared game");
-    Check(sendGameKey(0, 0) == -1 && releaseGameKeys() == 0 && setGameParked(0) == 0,
+    Check(sendGameKey(0, 0) == -1 && releaseGameKeys() == 0,
         "The game controls are safe before Godot creates a scene");
     Check(forget != null, "Keychain delegate is callable through the native ABI");
     Check(signIn() == -1, "The Steam session command waits for the launcher host");
@@ -115,7 +116,10 @@ unsafe
 
         JsonElement ModChoice(JsonElement prompt, string key) => prompt.GetProperty("Choices").EnumerateArray()
             .Single(item => item.GetProperty("Value").GetString() == key);
-        Check(mods() == 0, "The installed mods pane opens through the native bridge");
+        Check(prepareGameShutdown() == 0 && gameDidQuit() == 0, "The launcher can complete game shutdown");
+        Check(WaitFor("Stage", "idle").GetProperty("Message").GetString()!.StartsWith("Game closed"),
+            "Shutdown returns to the launcher’s idle state");
+        Check(mods() == 0, "The installed mods pane opens after game shutdown");
         var installedMods = WaitFor("Prompt", "mod");
         Check(ModChoice(installedMods, package.Key).GetProperty("IsOn").GetBoolean(), "The package switch shows the installed state");
         Choose(installedMods, $"disable:{package.Key}");
