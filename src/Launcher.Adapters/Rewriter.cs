@@ -1,3 +1,4 @@
+using System.Reflection.PortableExecutable;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using System.Security.Cryptography;
@@ -136,9 +137,45 @@ Console.WriteLine($"Prepared {args[0]} for the iOS JIT runtime.");
             instruction.Next?.OpCode.Code is Code.Bge or Code.Bge_S or Code.Blt or Code.Blt_S or Code.Clt)
             .ToArray();
         if (limits is not [var limit]) return false;
-        limit.OpCode = OpCodes.Ldc_I4_6;
-        limit.Operand = null;
-        WriteAssembly(assembly, output);
+        // Only the immediate value needs to change. Re-emitting the assembly
+        // would resolve unrelated custom attributes against the iPad runtime.
+        using var stream = File.OpenRead(input);
+        using var pe = new PEReader(stream);
+        var il = System.Reflection.Metadata.PEReaderExtensions.GetMethodBody(pe, queue.RVA).GetILContent();
+        if (limit.Offset < 0 || limit.Offset > il.Length - 5 ||
+            !il.AsSpan(limit.Offset, 5).SequenceEqual(new byte[] { 0x20, 128, 0, 0, 0 }))
+            return false;
+        var sectionIndex = pe.PEHeaders.GetContainingSectionIndex(queue.RVA);
+        if (sectionIndex < 0) return false;
+        var section = pe.PEHeaders.SectionHeaders[sectionIndex];
+        long methodOffset = (long)section.PointerToRawData + queue.RVA - section.VirtualAddress;
+        stream.Position = methodOffset;
+        int first = stream.ReadByte();
+        int headerLength = (first & 3) switch
+        {
+            2 => 1,
+            3 => (stream.ReadByte() >> 4) * 4,
+            _ => 0
+        };
+        if (headerLength <= 0) return false;
+        long valueOffset = methodOffset + headerLength + limit.Offset + 1;
+        if (valueOffset >= stream.Length) return false;
+        stream.Position = valueOffset;
+        if (stream.ReadByte() != 128) return false;
+
+        var temporary = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            stream.Position = 0;
+            using (var target = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write))
+            {
+                stream.CopyTo(target);
+                target.Position = valueOffset;
+                target.WriteByte(6);
+            }
+            File.Move(temporary, output, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
         return true;
     }
 

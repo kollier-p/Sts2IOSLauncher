@@ -306,11 +306,15 @@ try
     using var adapted = AssemblyDefinition.ReadAssembly(adaptedPath);
     var instructions = adapted.MainModule.GetType(loadingSession.FullName).Methods.Single().Body.Instructions;
     Check(instructions.Count == queue.Body.Instructions.Count &&
-        instructions.Count(instruction => instruction.OpCode == OpCodes.Ldc_I4_6) == 1 &&
+        instructions.Count(instruction => instruction.OpCode == OpCodes.Ldc_I4 && instruction.Operand is 6) == 1 &&
         instructions.Any(instruction => instruction.Operand is MethodReference call && call.Name == request.Name) &&
         adapted.Name.FullName == fixture.Name.FullName && adapted.MainModule.Mvid == module.Mvid &&
         File.ReadAllBytes(gamePath).SequenceEqual(sourceBytes),
         "The asset adapter changes the queue capacity while preserving the loader call and assembly identity");
+    var adaptedBytes = File.ReadAllBytes(adaptedPath);
+    Check(sourceBytes.Length == adaptedBytes.Length &&
+        sourceBytes.Zip(adaptedBytes).Count(pair => pair.First != pair.Second) == 1,
+        "The game adapter patches the single queue limit byte without rewriting assembly metadata");
     limit.Operand = 32;
     var different = Path.Combine(compatibilityDirectory, "fixture-custom.dll");
     fixture.Write(different);
