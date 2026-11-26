@@ -272,12 +272,50 @@ try
     platform.Body.GetILProcessor().Emit(OpCodes.Ldnull);
     platform.Body.GetILProcessor().Emit(OpCodes.Ret);
     node.Methods.Add(platform);
+    var loadingSession = new TypeDefinition("MegaCrit.Sts2.Core.Assets", "AssetLoadingSession",
+        TypeAttributes.Class, module.TypeSystem.Object);
+    module.Types.Add(loadingSession);
+    var queue = new MethodDefinition("ProcessLoadingQueue", MethodAttributes.Private, module.TypeSystem.Void);
+    loadingSession.Methods.Add(queue);
+    var godotAssembly = new AssemblyNameReference("GodotSharp", new Version(4, 5, 1));
+    module.AssemblyReferences.Add(godotAssembly);
+    var loader = new TypeReference("Godot", "ResourceLoader", module, godotAssembly);
+    var request = new MethodReference("LoadThreadedRequest", module.TypeSystem.Int32, loader);
+    request.Parameters.Add(new ParameterDefinition(module.TypeSystem.String));
+    var queueIl = queue.Body.GetILProcessor();
+    var endQueue = queueIl.Create(OpCodes.Ret);
+    queueIl.Emit(OpCodes.Ldnull);
+    queueIl.Emit(OpCodes.Callvirt, module.ImportReference(typeof(Queue<string>).GetProperty("Count")!.GetMethod!));
+    var limit = queueIl.Create(OpCodes.Ldc_I4, 128);
+    queueIl.Append(limit);
+    queueIl.Emit(OpCodes.Bge, endQueue);
+    queueIl.Emit(OpCodes.Ldstr, "res://fixture.tscn");
+    queueIl.Emit(OpCodes.Call, request);
+    queueIl.Emit(OpCodes.Pop);
+    queueIl.Append(endQueue);
     fixture.Write(gamePath);
     Check(GameCompatibilityAudit.FirstIssue(gamePath, false, false) is null, "The expected Godot and platform methods pass audit");
     Check(GameCompatibilityAudit.FirstIssue(gamePath, true, false)?.Contains("save hooks") == true,
         "An isolated profile detects a missing save hook before switching to Godot");
     Check(GameCompatibilityAudit.FirstIssue(gamePath, false, true)?.Contains("mod path") == true,
         "Isolated and paused mods require the scanner signature");
+
+    var sourceBytes = File.ReadAllBytes(gamePath);
+    var adaptedPath = Path.Combine(compatibilityDirectory, "fixture-mobile.dll");
+    Check(Rewriter.PrepareGameAssetLoading(gamePath, adaptedPath), "The game asset adapter detects the desktop load limit");
+    using var adapted = AssemblyDefinition.ReadAssembly(adaptedPath);
+    var instructions = adapted.MainModule.GetType(loadingSession.FullName).Methods.Single().Body.Instructions;
+    Check(instructions.Count == queue.Body.Instructions.Count &&
+        instructions.Count(instruction => instruction.OpCode == OpCodes.Ldc_I4_6) == 1 &&
+        instructions.Any(instruction => instruction.Operand is MethodReference call && call.Name == request.Name) &&
+        adapted.Name.FullName == fixture.Name.FullName && adapted.MainModule.Mvid == module.Mvid &&
+        File.ReadAllBytes(gamePath).SequenceEqual(sourceBytes),
+        "The asset adapter changes the queue capacity while preserving the loader call and assembly identity");
+    limit.Operand = 32;
+    var different = Path.Combine(compatibilityDirectory, "fixture-custom.dll");
+    fixture.Write(different);
+    Check(!Rewriter.PrepareGameAssetLoading(different, Path.Combine(compatibilityDirectory, "unused.dll")),
+        "A different game queue implementation uses its original capacity");
 }
 finally { Directory.Delete(compatibilityDirectory, recursive: true); }
 

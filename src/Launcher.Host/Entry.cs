@@ -1534,6 +1534,25 @@ public static class Entry
         var adaptedDiagnostics = File.Exists(godot) && Launcher.Adapters.Rewriter.PrepareGodotDiagnostics(godot, godotDiagnostics);
         if (!adaptedDiagnostics && File.Exists(godotDiagnostics)) File.Delete(godotDiagnostics);
         HostDiagnostics.Stage(adaptedDiagnostics ? "prepared Godot backtrace parameter guard" : "Godot backtrace guard unavailable");
+        var gameAssembly = plan.GameAssembly;
+        if (OperatingSystem.IsIOS())
+        {
+            var assetLoadingAdapter = Path.Combine(adapter, Path.GetFileName(plan.GameAssembly));
+            try
+            {
+                if (Launcher.Adapters.Rewriter.PrepareGameAssetLoading(plan.GameAssembly, assetLoadingAdapter))
+                {
+                    gameAssembly = assetLoadingAdapter;
+                    HostDiagnostics.Stage("limited game background asset loads to six in flight");
+                }
+                else HostDiagnostics.Stage("game asset loader version uses its original request limit");
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException)
+            {
+                HostDiagnostics.Error("prepare game asset loading limit", error);
+            }
+            if (gameAssembly == plan.GameAssembly && File.Exists(assetLoadingAdapter)) File.Delete(assetLoadingAdapter);
+        }
         launchOptions = OptionsStore(payloads).Load();
         launchSafeMode = safeMode;
         if (safeMode) launchOptions = new(RenderWarmup: false);
@@ -1594,7 +1613,7 @@ public static class Entry
         cloud?.GameStarting();
         gameWebDav = cloud;
         if (adaptedDiagnostics) AssemblyLoadContext.Default.LoadFromAssemblyPath(godotDiagnostics);
-        loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(plan.GameAssembly);
+        loadedGame = AssemblyLoadContext.Default.LoadFromAssemblyPath(gameAssembly);
         releaseInfo = Path.Combine(Path.GetDirectoryName(plan.Pack)!, "release_info.json");
         HostDiagnostics.Stage($"launch prepared: mods {(launchProfilePaths.ModsPaused ? "paused" : "normal")}, " +
             $"preload {(launchOptions.RenderWarmup ? "enabled" : "off")}");

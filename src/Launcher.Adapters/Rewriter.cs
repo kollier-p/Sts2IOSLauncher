@@ -112,6 +112,36 @@ Console.WriteLine($"Prepared {args[0]} for the iOS JIT runtime.");
         return true;
     }
 
+    public static bool PrepareGameAssetLoading(string input, string output)
+    {
+        if (Path.GetFullPath(input) == Path.GetFullPath(output))
+            throw new ArgumentException("The original assembly must remain unchanged.");
+        using var assembly = AssemblyDefinition.ReadAssembly(input);
+        if (assembly.Name.HasPublicKey) return false;
+        var queue = assembly.MainModule.GetType("MegaCrit.Sts2.Core.Assets.AssetLoadingSession")?.Methods
+            .SingleOrDefault(method => method.Name == "ProcessLoadingQueue" && !method.IsStatic && method.HasBody &&
+                method.Parameters.Count == 0 && method.ReturnType.MetadataType == MetadataType.Void);
+        if (queue is null || !queue.Body.Instructions.Any(instruction =>
+            instruction.Operand is MethodReference called && called.Name == "LoadThreadedRequest" &&
+            called.DeclaringType.FullName == "Godot.ResourceLoader"))
+            return false;
+
+        // The desktop queue can retain decoded images faster than the renderer
+        // uploads them. Bound the known capacity check while keeping all assets,
+        // retries and load completion under the game's control.
+        var limits = queue.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Ldc_I4 &&
+            instruction.Operand is 128 &&
+            instruction.Previous?.Operand is MethodReference count && count.Name == "get_Count" &&
+            count.ReturnType.MetadataType == MetadataType.Int32 &&
+            instruction.Next?.OpCode.Code is Code.Bge or Code.Bge_S or Code.Blt or Code.Blt_S or Code.Clt)
+            .ToArray();
+        if (limits is not [var limit]) return false;
+        limit.OpCode = OpCodes.Ldc_I4_6;
+        limit.Operand = null;
+        WriteAssembly(assembly, output);
+        return true;
+    }
+
     static void WriteAssembly(AssemblyDefinition assembly, string output)
     {
         string temporary = output + "." + Guid.NewGuid().ToString("N") + ".tmp";

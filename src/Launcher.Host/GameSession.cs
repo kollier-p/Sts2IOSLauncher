@@ -7,6 +7,11 @@ internal static class GameSession
 {
     static WeakReference<object>? mainMenu;
     static MethodInfo? isValid, isMenuVisible;
+    static object? sceneTree;
+    static EventInfo? processFrame;
+    static Func<ulong?> availableMemory = GameMemory.AvailableBytes;
+    static bool collectedBeforeMenu;
+    static int returnsInProgress;
     static int menuReturnGeneration;
 
     internal static void ObserveMainMenu(object menu, Assembly godot)
@@ -18,6 +23,8 @@ internal static class GameSession
         isMenuVisible = canvas.IsInstanceOfType(menu)
             ? canvas.GetMethod("IsVisibleInTree", Type.EmptyTypes)!
             : node.GetMethod("IsInsideTree", Type.EmptyTypes)!;
+        sceneTree = node.GetMethod("GetTree", Type.EmptyTypes)?.Invoke(menu, null);
+        processFrame = godot.GetType("Godot.SceneTree")?.GetEvent("ProcessFrame");
         mainMenu = new(menu);
         GameMemory.Log("game main menu ready");
     }
@@ -52,6 +59,7 @@ internal static class GameSession
 
     public static void ReturnToMainMenuPrefix()
     {
+        if (Interlocked.Increment(ref returnsInProgress) == 1) collectedBeforeMenu = false;
         GameMemory.Log("returning from the run to the game main menu");
         GameRenderWarmup.ReleaseRetainedAssets();
         if (OperatingSystem.IsIOS())
@@ -60,7 +68,7 @@ internal static class GameSession
 
     public static void LoadMainMenuPrefix()
     {
-        if (GameMemory.AvailableBytes() is ulong bytes && bytes < GameMemory.MenuHeadroom)
+        if (!collectedBeforeMenu && availableMemory() is ulong bytes && bytes < GameMemory.MenuHeadroom)
         {
             // The run teardown and the game's cache eviction have run by this
             // point. Collect unused Godot resource wrappers without waiting
@@ -71,9 +79,59 @@ internal static class GameSession
         GameMemory.Log("game loading its main menu scene");
     }
 
+    public static void MainMenuPreloadPostfix(ref Task __result)
+    {
+        if (Volatile.Read(ref returnsInProgress) > 0 && sceneTree is { } tree && processFrame is { } frame)
+            __result = AllowResourceRetirementAsync(__result, tree, frame);
+    }
+
+    static async Task AllowResourceRetirementAsync(Task preload, object tree, EventInfo frame)
+    {
+        await preload;
+        if (availableMemory() is not ulong bytes || bytes >= GameMemory.MenuHeadroom) return;
+
+        // Resource frees are queued by the old scene and the asset cache. Let
+        // finalizers and the renderer process those frees before instantiating
+        // the next scene on top of the old frame's allocations.
+        GameMemory.Log("waiting for queued resource frees before loading the game main menu");
+        var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int remainingFrames = 3;
+        Action onFrame = () =>
+        {
+            remainingFrames--;
+            if (remainingFrames == 2)
+            {
+                GC.Collect();
+                collectedBeforeMenu = true;
+            }
+            if (remainingFrames == 0) rendered.TrySetResult();
+        };
+        Delegate? callback = null;
+        try
+        {
+            var delegateHandler = Delegate.CreateDelegate(frame.EventHandlerType!, onFrame.Target, onFrame.Method);
+            frame.AddEventHandler(tree, delegateHandler);
+            callback = delegateHandler;
+            var completed = await Task.WhenAny(rendered.Task, Task.Delay(750));
+            GameMemory.Log(completed == rendered.Task
+                ? "processed three frames before loading the game main menu"
+                : "menu resource retirement reached its time limit");
+        }
+        catch (Exception error) { HostDiagnostics.Error("wait for game menu resource retirement", error); }
+        finally
+        {
+            try { if (callback is not null) frame.RemoveEventHandler(tree, callback); }
+            catch (Exception error) { HostDiagnostics.Error("detach game menu resource retirement", error); }
+        }
+    }
+
     public static void ReturnToMainMenuPostfix(Task __result) => _ = ObserveMenuReturnAsync(__result);
 
-    internal static void End() => Interlocked.Increment(ref menuReturnGeneration);
+    internal static void End()
+    {
+        sceneTree = null;
+        Interlocked.Increment(ref menuReturnGeneration);
+    }
 
     static async Task LogMenuReturnMemoryAsync(int generation)
     {
@@ -96,6 +154,7 @@ internal static class GameSession
         }
         catch (OperationCanceledException) { HostDiagnostics.Stage("game main menu return cancelled"); }
         catch (Exception error) { HostDiagnostics.Error("game main menu return failed", error); }
+        finally { Interlocked.Decrement(ref returnsInProgress); }
     }
 
     static async Task ReturnAfterQuitAsync(Task quit)

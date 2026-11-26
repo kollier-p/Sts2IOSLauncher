@@ -187,6 +187,10 @@ internal static class GameCompatibility
             {
                 Patch(gameReturn, typeof(GameSession).GetMethod(nameof(GameSession.ReturnToMainMenuPrefix))!);
                 Patch(gameReturn, typeof(GameSession).GetMethod(nameof(GameSession.ReturnToMainMenuPostfix))!, "postfix");
+                var preload = game?.GetType("MegaCrit.Sts2.Core.Assets.PreloadManager")?.GetMethod(
+                    "LoadCommonAndMainMenuAssets", Flags, binder: null, types: Type.EmptyTypes, modifiers: null);
+                if (preload?.IsStatic == true && preload.ReturnType == typeof(Task))
+                    Patch(preload, typeof(GameSession).GetMethod(nameof(GameSession.MainMenuPreloadPostfix))!, "postfix");
             }
             else HostDiagnostics.Stage("game menu return diagnostics unavailable for this version");
 
