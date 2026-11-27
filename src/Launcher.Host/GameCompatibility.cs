@@ -142,6 +142,12 @@ internal static class GameCompatibility
                 catch (Exception error) { HostDiagnostics.Error("install game menu preload memory guard", error); }
                 try { GameViewDiagnostics.Install(game, godot, Patch); }
                 catch (Exception error) { HostDiagnostics.Error("install game view diagnostics", error); }
+                try
+                {
+                    GameMemoryTrace.Install(__instance, godot, Patch);
+                    GameMemoryTrace.Begin("main menu");
+                }
+                catch (Exception error) { HostDiagnostics.Error("install game memory trace", error); }
             }
             if (!pendingSafeMode) PatchUnsupportedMouseCalls(godot);
         }

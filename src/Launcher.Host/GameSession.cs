@@ -20,6 +20,7 @@ internal static class GameSession
             : node.GetMethod("IsInsideTree", Type.EmptyTypes)!;
         mainMenu = new(menu);
         GameMemory.Log("game main menu ready");
+        GameMemoryTrace.Begin("main menu");
     }
 
     static bool MainMenuVisible()
@@ -54,6 +55,7 @@ internal static class GameSession
     {
         GameMemory.Log("returning from the run to the game main menu");
         GameRenderWarmup.ReleaseRetainedAssets();
+        GameMemoryTrace.Begin("leaving run");
         if (OperatingSystem.IsIOS())
             _ = LogMenuReturnMemoryAsync(Interlocked.Increment(ref menuReturnGeneration));
     }
@@ -65,6 +67,7 @@ internal static class GameSession
     internal static void End()
     {
         GameViewDiagnostics.End();
+        GameMemoryTrace.End();
         Interlocked.Increment(ref menuReturnGeneration);
     }
 
