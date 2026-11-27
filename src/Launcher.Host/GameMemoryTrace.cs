@@ -69,6 +69,44 @@ internal static class GameMemoryTrace
             method.GetParameters() is [{ ParameterType: var path }, ..] && path == typeof(string));
         if (request is not null) patch(request, typeof(GameMemoryTrace).GetMethod(nameof(ThreadedRequestPrefix))!, "prefix");
         HostDiagnostics.Stage($"game memory trace installed ({monitorIds.Count} Godot counters)");
+        LogShaderCache(godot);
+    }
+
+    // Godot keeps compiled shaders in user://shader_cache between launches, and
+    // iPadOS caches the Metal pipelines built from them. Report whether the game
+    // has the cache enabled and how much it holds.
+    static void LogShaderCache(Assembly godot)
+    {
+        try
+        {
+            var settings = godot.GetType("Godot.ProjectSettings", throwOnError: true)!;
+            var getSetting = settings.GetMethods().First(method => method.Name == "GetSetting" &&
+                method.GetParameters() is [{ ParameterType: var name }, ..] && name == typeof(string));
+            string Setting(string key)
+            {
+                var arguments = getSetting.GetParameters().Length == 1 ? new object?[] { key } :
+                    new object?[] { key, Activator.CreateInstance(getSetting.GetParameters()[1].ParameterType) };
+                return getSetting.Invoke(null, arguments)?.ToString() ?? "unset";
+            }
+            var globalize = settings.GetMethod("GlobalizePath", [typeof(string)])!;
+            var directory = globalize.Invoke(null, ["user://shader_cache"]) as string;
+            long bytes = 0;
+            int files = 0;
+            if (directory is not null && Directory.Exists(directory))
+                foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+                {
+                    files++;
+                    bytes += new FileInfo(file).Length;
+                }
+            HostDiagnostics.Stage($"game shader cache {Setting("rendering/shader_compiler/shader_cache/enabled")}, " +
+                $"pipeline cache {Setting("rendering/rendering_device/pipeline_cache/enable")}, " +
+                $"{files} cached shader files ({bytes / (long)GameMemory.MiB} MiB)");
+        }
+        catch (Exception error)
+        {
+            HostDiagnostics.Error("read game shader cache settings",
+                error is TargetInvocationException { InnerException: { } cause } ? cause : error);
+        }
     }
 
     internal static void Begin(string reason)

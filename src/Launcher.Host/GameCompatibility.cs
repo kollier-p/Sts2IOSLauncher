@@ -49,6 +49,10 @@ internal static class GameCompatibility
         {
             modSettingsType = init.GetParameters()[1].ParameterType;
             Patch(init, typeof(GameCompatibility).GetMethod(nameof(InitializeMods), Flags)!);
+            if (init.ReturnType == typeof(void))
+                Patch(init, typeof(GameCompatibility).GetMethod(nameof(ModsInitialized), Flags)!, "postfix");
+            else if (init.ReturnType == typeof(Task))
+                Patch(init, typeof(GameCompatibility).GetMethod(nameof(ModsInitializedAsync), Flags)!, "postfix");
         }
         if (initializers.Length == 0 && enableLauncherMods)
             HostDiagnostics.Stage("mod initialization hook unavailable; using the game scanner");
@@ -302,8 +306,23 @@ internal static class GameCompatibility
     static bool IsModRoot(string? path) => !string.IsNullOrEmpty(path) &&
         Path.GetFileName(path.Replace('\\', '/').TrimEnd('/')).Equals("mods", StringComparison.OrdinalIgnoreCase);
 
+    static long modsStarted;
+
+    // Mod assemblies load and apply their Harmony patches here, which takes most
+    // of the time before the main menu on the iPad JIT. Report how long it takes.
+    public static void ModsInitialized()
+    {
+        if (modsStarted != 0)
+            HostDiagnostics.Stage($"game mod initialization took " +
+                $"{System.Diagnostics.Stopwatch.GetElapsedTime(modsStarted).TotalMilliseconds:F0} ms");
+    }
+
+    public static void ModsInitializedAsync(Task __result) =>
+        _ = __result.ContinueWith(_ => ModsInitialized(), TaskScheduler.Default);
+
     public static void InitializeMods(object[] __args)
     {
+        modsStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             var io = __args[0];

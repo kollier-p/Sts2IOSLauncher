@@ -1509,21 +1509,34 @@ public static class Entry
         launchProfilePaths = paths with { ModsDirectory = mods, ModsPaused = mods != paths.ModsDirectory };
         launchHasEnabledMods = !launchProfilePaths.ModsPaused && modLibrary.EnabledModuleIds().Count != 0;
         Publish(new("verify", "Checking game runtime compatibility…"));
-        if (Launcher.Adapters.GameCompatibilityAudit.FirstIssue(plan.GameAssembly, activeProfile.IsolateSaves,
-            activeProfile.IsolateMods || launchProfilePaths.ModsPaused) is { } issue)
+        var prepareTimer = System.Diagnostics.Stopwatch.StartNew();
+        var support = Path.GetDirectoryName(payloads.Root)!;
+        var adapter = RuntimeAdapterDirectory(payloads, plan.Receipt.PayloadId);
+        Directory.CreateDirectory(adapter);
+        bool checkSaves = activeProfile.IsolateSaves, checkMods = activeProfile.IsolateMods || launchProfilePaths.ModsPaused;
+        string? issue = null;
+        CachedAdapter(Path.Combine(adapter, $"compatibility-{checkSaves}-{checkMods}.ok"), [plan.GameAssembly], output =>
+        {
+            issue = Launcher.Adapters.GameCompatibilityAudit.FirstIssue(plan.GameAssembly, checkSaves, checkMods);
+            if (issue is not null) return false;
+            File.WriteAllText(output, "");
+            return true;
+        });
+        if (issue is not null)
         {
             HostDiagnostics.Error("check game assembly compatibility", new NotSupportedException(issue));
             return new("error", issue);
         }
-        var support = Path.GetDirectoryName(payloads.Root)!;
-        var adapter = RuntimeAdapterDirectory(payloads, plan.Receipt.PayloadId);
-        Directory.CreateDirectory(adapter);
         var harmony = Path.Combine(plan.Assemblies, "0Harmony.dll");
         if (!File.Exists(harmony)) return new("error", "The selected installation is missing its Harmony runtime.");
         try
         {
-            Launcher.Adapters.Rewriter.Prepare("harmony", harmony, Path.Combine(managed, "STS2JitSupport.dll"),
-                Path.Combine(adapter, "0Harmony.dll"));
+            var jitSupport = Path.Combine(managed, "STS2JitSupport.dll");
+            CachedAdapter(Path.Combine(adapter, "0Harmony.dll"), [harmony, jitSupport], output =>
+            {
+                Launcher.Adapters.Rewriter.Prepare("harmony", harmony, jitSupport, output);
+                return true;
+            });
         }
         catch (NotSupportedException error)
         {
@@ -1532,7 +1545,8 @@ public static class Entry
         }
         var godot = Path.Combine(plan.Assemblies, "GodotSharp.dll");
         var godotDiagnostics = Path.Combine(adapter, "GodotSharp.dll");
-        var adaptedDiagnostics = File.Exists(godot) && Launcher.Adapters.Rewriter.PrepareGodotDiagnostics(godot, godotDiagnostics);
+        var adaptedDiagnostics = File.Exists(godot) && CachedAdapter(godotDiagnostics, [godot],
+            output => Launcher.Adapters.Rewriter.PrepareGodotDiagnostics(godot, output));
         if (!adaptedDiagnostics && File.Exists(godotDiagnostics)) File.Delete(godotDiagnostics);
         HostDiagnostics.Stage(adaptedDiagnostics ? "prepared Godot backtrace parameter guard" : "Godot backtrace guard unavailable");
         var gameAssembly = plan.GameAssembly;
@@ -1541,7 +1555,8 @@ public static class Entry
             var assetLoadingAdapter = Path.Combine(adapter, Path.GetFileName(plan.GameAssembly));
             try
             {
-                if (Launcher.Adapters.Rewriter.PrepareGameAssetLoading(plan.GameAssembly, assetLoadingAdapter))
+                if (CachedAdapter(assetLoadingAdapter, [plan.GameAssembly],
+                    output => Launcher.Adapters.Rewriter.PrepareGameAssetLoading(plan.GameAssembly, output)))
                 {
                     gameAssembly = assetLoadingAdapter;
                     HostDiagnostics.Stage("limited game background asset loads to six in flight");
@@ -1554,6 +1569,7 @@ public static class Entry
             }
             if (gameAssembly == plan.GameAssembly && File.Exists(assetLoadingAdapter)) File.Delete(assetLoadingAdapter);
         }
+        HostDiagnostics.Stage($"prepared game runtime adapters in {prepareTimer.ElapsedMilliseconds} ms");
         launchOptions = OptionsStore(payloads).Load();
         launchSafeMode = safeMode;
         if (safeMode) launchOptions = new(RenderWarmup: false);
@@ -1621,6 +1637,29 @@ public static class Entry
         HostDiagnostics.Stage($"launch prepared: mods {(launchProfilePaths.ModsPaused ? "paused" : "normal")}, " +
             $"preload {(launchOptions.RenderWarmup ? "enabled" : "off")}");
         return new("ready", "Game verified. Starting Godot…");
+    }
+
+    // The adapters depend only on their inputs and this launcher build. Reuse them
+    // when neither changed instead of rewriting the assemblies on every launch.
+    static readonly string AdapterBuild = typeof(Entry).Assembly.ManifestModule.ModuleVersionId.ToString("N");
+
+    static bool CachedAdapter(string output, string[] inputs, Func<string, bool> prepare)
+    {
+        var stampPath = output + ".stamp";
+        var stamp = string.Join("|", inputs.Select(input =>
+        {
+            var info = new FileInfo(input);
+            return $"{Path.GetFileName(input)}:{info.Length}:{info.LastWriteTimeUtc.Ticks}";
+        }).Prepend(AdapterBuild));
+        try
+        {
+            if (File.Exists(output) && File.Exists(stampPath) && File.ReadAllText(stampPath) == stamp) return true;
+        }
+        catch (IOException) { }
+        File.Delete(stampPath);
+        if (!prepare(output)) return false;
+        File.WriteAllText(stampPath, stamp);
+        return true;
     }
 
     static void CopyLaunchPack(string source, string destination, CancellationToken ct)

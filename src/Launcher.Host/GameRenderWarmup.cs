@@ -10,6 +10,7 @@ internal sealed class GameRenderWarmup
     const int BatchSize = 4;
     const int DrawSlots = 8;
     const int SceneDrawLimit = 4;
+    const int SettleLimitSeconds = 30;
 
     static readonly List<object> RetainedAssets = [];
     static bool started;
@@ -29,6 +30,7 @@ internal sealed class GameRenderWarmup
     GameWarmupVisuals visuals = null!;
     GameWarmupMemory? memory;
     readonly Stopwatch elapsed = Stopwatch.StartNew();
+    Stopwatch? settledSince;
     readonly List<string> available = [];
     readonly HashSet<GameWarmupVisuals.Preview> drawn = [];
     string[] work = [];
@@ -98,6 +100,23 @@ internal sealed class GameRenderWarmup
         GameMemory.Log($"released {count} startup warmup asset references");
     }
 
+    // The main menu briefly uses ~1 GiB while its first frame renders. Starting
+    // during that spike made the memory guard stop the preload before it drew
+    // anything, so wait until the menu's memory use has settled.
+    bool MenuSettled()
+    {
+        if (GameMemory.AvailableBytes() is not ulong available) return true;
+        if (available < GameWarmupMemory.StartHeadroom)
+        {
+            settledSince = null;
+            return false;
+        }
+        settledSince ??= Stopwatch.StartNew();
+        if (settledSince.Elapsed < TimeSpan.FromSeconds(1)) return false;
+        GameMemory.Log($"starting startup preload after the menu settled ({elapsed.ElapsedMilliseconds} ms)");
+        return true;
+    }
+
     Type Godot(string type) => godot.GetType("Godot." + type, throwOnError: true)!;
     object New(string type, params object[] inputs) => Activator.CreateInstance(Godot(type), inputs)!;
     static void Set(object target, string property, object value) => target.GetType().GetProperty(property)!.SetValue(target, value);
@@ -119,6 +138,11 @@ internal sealed class GameRenderWarmup
                 Finish("menu closed");
                 return;
             }
+            if (overlay is null && !MenuSettled())
+            {
+                if (elapsed.Elapsed > TimeSpan.FromSeconds(SettleLimitSeconds)) Finish("menu memory did not settle");
+                return;
+            }
             if (elapsed.Elapsed > TimeSpan.FromSeconds(extended ? 60 : 12))
             {
                 Finish("time limit");
@@ -126,6 +150,7 @@ internal sealed class GameRenderWarmup
             }
             if (overlay is null)
             {
+                elapsed.Restart();
                 ShowOverlay();
                 // Allow the overlay to draw before we inspect assets or use the renderer.
                 return;
