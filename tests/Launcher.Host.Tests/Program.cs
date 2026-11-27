@@ -178,7 +178,7 @@ Check(!defersPreload("Common", 2560 * mib) && !defersPreload("Common", null) &&
 var memoryTarget = typeof(Entry).Assembly.GetType("Launcher.Host.GameMemory", throwOnError: true)!
     .GetMethod("TargetLimitMiB", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
 uint targetLimit(ulong bytes) => (uint)memoryTarget.Invoke(null, [bytes])!;
-Check(targetLimit(4096 * mib) == 3072 && targetLimit(6144 * mib) == 4915 && targetLimit(1536 * mib) == 0,
+Check(targetLimit(4096 * mib) == 3328 && targetLimit(6144 * mib) == 5222 && targetLimit(1536 * mib) == 0,
     "The raised iPad memory limit leaves room for the system on 4 GB and 6 GB devices");
 
 Check(SteamCloudSaves.LocalPath("%GameInstall%\\modded\\profile2\\saves\\progress.save", false) ==

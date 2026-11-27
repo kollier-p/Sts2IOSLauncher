@@ -75,9 +75,10 @@ Failure read_layout(const uint8_t *source, int64_t size, Layout &layout) {
     if (read_u32(image_header) != 0 || !layout.decoder) {
         return kUnsupportedFormat;
     }
-    // Preserve the image geometry Godot imported. Bound scratch memory to two 4K RGBA images.
-    if (layout.width < 1 || layout.height < 1 || layout.width % 4 || layout.height % 4 ||
-        layout.width > 4096 || layout.height > 4096) {
+    // Preserve the image geometry Godot imported. Edge blocks are padded the same way
+    // for BC and ASTC 4x4, so sizes need not be whole blocks. Bound scratch memory
+    // to two 8K RGBA images; large backgrounds are the textures that matter most.
+    if (layout.width < 1 || layout.height < 1 || layout.width > 8192 || layout.height > 8192) {
         return kNotWholeBlocks;
     }
     size_t source_needed = kPrefixBytes;
@@ -214,8 +215,9 @@ API int32_t sts2_texture_encoder_convert(sts2_texture_encoder *encoder, const ui
                 return kEncoderFailed;
             }
             if (mip == 0) {
-                // Keep the desktop texture when ASTC introduces visible loss.
-                // A mean squared channel error of 6.5025 is PSNR 40 dB.
+                // Keep the desktop texture only when the encode is clearly broken. The iPad GPU
+                // cannot sample BC formats, so a kept texture is expanded to RGBA8 at 4-8x the
+                // memory. A mean squared channel error of 65.025 is PSNR 30 dB.
                 const astcenc_swizzle swizzle = {ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
                 std::vector<uint8_t> decoded(pixels.size());
                 void *slice = decoded.data();
@@ -228,7 +230,7 @@ API int32_t sts2_texture_encoder_convert(sts2_texture_encoder *encoder, const ui
                     const int difference = int(decoded[i]) - int(pixels[i]);
                     squared_error += difference * difference;
                 }
-                if (squared_error * 10000 > uint64_t(decoded.size()) * 65025) return kBelowQualityThreshold;
+                if (squared_error * 1000 > uint64_t(decoded.size()) * 65025) return kBelowQualityThreshold;
             }
             read += mip_bytes(w, h, layout.source_block);
             write += bytes;

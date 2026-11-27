@@ -7,7 +7,7 @@ namespace Launcher.Core;
 
 public static class PckTextureOptimizer
 {
-    const int MaxTextureBytes = 32 * 1024 * 1024;
+    const int MaxTextureBytes = 160 * 1024 * 1024;
     const int CheckpointBytes = 4 + 16 + 16;
     static readonly Regex DesktopPath = new(@"(?m)^path\.(?:s3tc|bptc)[ \t]*=[ \t]*""res://(\.godot/imported/[^""\r\n]+\.(?:s3tc|bptc)\.ctex)""[ \t]*(?=\r?$)");
     static readonly Regex PhonePath = new(@"(?m)^path(?:\.astc)?[ \t]*=");
@@ -22,8 +22,9 @@ public static class PckTextureOptimizer
     {
         if (sourceSha256.Length != 64 || !sourceSha256.All(Uri.IsHexDigit))
             throw new ArgumentException("The installed pack needs a SHA-256 digest.", nameof(sourceSha256));
-        string output = Path.Combine(cacheDirectory, $"ipad-astc4x4-v1-{sourceSha256.ToLowerInvariant()}.pck");
+        string output = Path.Combine(cacheDirectory, $"{CachePrefix}{sourceSha256.ToLowerInvariant()}.pck");
         if (File.Exists(output)) return output;
+        RemoveOutdatedPacks(cacheDirectory);
 
         using var input = File.OpenRead(source);
         var pack = ReadPack(input, ct);
@@ -133,6 +134,21 @@ public static class PckTextureOptimizer
             done++;
         }
         return done;
+    }
+
+    // v2 converts large, unaligned and detailed textures that v1 left in desktop formats.
+    const string CachePrefix = "ipad-astc4x4-v2-";
+    static readonly string[] OutdatedPrefixes = ["ipad-astc4x4-v1-"];
+
+    static void RemoveOutdatedPacks(string cacheDirectory)
+    {
+        if (!Directory.Exists(cacheDirectory)) return;
+        foreach (var prefix in OutdatedPrefixes)
+            foreach (var file in Directory.EnumerateFiles(cacheDirectory, prefix + "*"))
+            {
+                try { File.Delete(file); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
     }
 
     static bool IsAstcTexture(byte[] data) => data.Length is >= 52 and <= MaxTextureBytes &&

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Launcher.Host;
@@ -15,10 +14,7 @@ internal static class GameMemory
     const uint MemlimitAttrFatal = 1;
 
     // Leave this much physical memory to iPadOS, SpringBoard and the GPU driver.
-    const ulong SystemReserve = 1024 * MiB;
-
-    static long lastReclaim;
-    static int reclaiming;
+    const ulong SystemReserve = 768 * MiB;
 
     internal static ulong? AvailableBytes() => OperatingSystem.IsIOS() ? AvailableProcessMemory() : null;
 
@@ -43,7 +39,7 @@ internal static class GameMemory
     {
         if (physicalBytes <= SystemReserve * 2) return 0;
         ulong byReserve = physicalBytes - SystemReserve;
-        ulong byShare = physicalBytes / 5 * 4;
+        ulong byShare = physicalBytes / 20 * 17;
         return (uint)(Math.Min(byReserve, byShare) / MiB);
     }
 
@@ -93,37 +89,6 @@ internal static class GameMemory
         {
             HostDiagnostics.Error("raise iPad memory limit", error);
         }
-    }
-
-    // Godot resources such as textures are released only when their managed
-    // wrappers are finalized. The managed heap is small, so the runtime rarely
-    // collects on its own while native texture memory keeps growing.
-    internal static void Reclaim(string reason, bool force = false)
-    {
-        long now = Stopwatch.GetTimestamp();
-        var minimum = force ? TimeSpan.FromMilliseconds(500) : TimeSpan.FromSeconds(4);
-        long last = Volatile.Read(ref lastReclaim);
-        if (last != 0 && Stopwatch.GetElapsedTime(last, now) < minimum) return;
-        if (Interlocked.CompareExchange(ref reclaiming, 1, 0) != 0) return;
-        Volatile.Write(ref lastReclaim, now);
-        // Finalizers may need the Godot main thread, so never wait on it there.
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                var before = AvailableBytes();
-                var timer = Stopwatch.StartNew();
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
-                GC.WaitForPendingFinalizers();
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: false);
-                var after = AvailableBytes();
-                if (before is ulong b && after is ulong a)
-                    HostDiagnostics.Stage($"reclaimed managed game memory after {reason} in {timer.ElapsedMilliseconds} ms " +
-                        $"(iPad process headroom {b / MiB} → {a / MiB} MiB)");
-            }
-            catch (Exception error) { HostDiagnostics.Error("reclaim managed game memory", error); }
-            finally { Volatile.Write(ref reclaiming, 0); }
-        });
     }
 
     static ulong PhysicalMemory()

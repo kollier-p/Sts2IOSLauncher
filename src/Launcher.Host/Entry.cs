@@ -1582,6 +1582,8 @@ public static class Entry
                     }, ct);
                 if (launchPack != plan.Pack)
                     HostDiagnostics.Stage(converted == 0 ? "using cached iPad texture pack" : $"optimized {converted} game textures for iPad");
+                if (encoder.KeptSummary is { Length: > 0 } kept)
+                    HostDiagnostics.Stage($"textures kept in desktop formats: {kept}");
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or
                 EntryPointNotFoundException or DllNotFoundException or InvalidOperationException)
@@ -1715,7 +1717,6 @@ public static class Entry
     public static int ReportGameMemoryWarning()
     {
         GameMemory.Log("iPadOS sent the game a memory warning");
-        GameMemory.Reclaim("memory warning", force: true);
         return 0;
     }
 
