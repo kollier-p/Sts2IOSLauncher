@@ -21,6 +21,15 @@ internal static class GameSession
         mainMenu = new(menu);
         GameMemory.Log("game main menu ready");
         GameMemoryTrace.Begin("main menu");
+        try
+        {
+            GameMenuRetention.Release();
+            GameMenuRetention.Retain(menu, godot);
+        }
+        catch (Exception error)
+        {
+            HostDiagnostics.Error("keep main menu resources", error is TargetInvocationException { InnerException: { } cause } ? cause : error);
+        }
     }
 
     static bool MainMenuVisible()
@@ -68,6 +77,7 @@ internal static class GameSession
     {
         GameViewDiagnostics.End();
         GameMemoryTrace.End();
+        GameMenuRetention.Release();
         Interlocked.Increment(ref menuReturnGeneration);
     }
 
