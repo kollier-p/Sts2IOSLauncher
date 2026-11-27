@@ -57,6 +57,9 @@ internal static class GameViewDiagnostics
             : "";
         GameMemory.Log($"{__state.Operation} {(__exception is null ? "finished" : "failed")} in {elapsed:F0} ms{frameCount}");
         if (__exception is not null) HostDiagnostics.Error(__state.Operation, __exception);
+        // Scene changes leave the previous scene's resources to the finalizer.
+        if (__state.Operation.StartsWith("NSceneContainer.SetCurrentScene", StringComparison.Ordinal))
+            GameMemory.Reclaim("scene change");
     }
 
     public static void ObserveTask(Task __result, Observation __state) => _ = TrackTaskAsync(__result, __state);

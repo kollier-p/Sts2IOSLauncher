@@ -62,7 +62,41 @@ def sign_app(app, profile_path, identity, bundle_identifier):
         raise SystemExit("The packaged app does not have the required development entitlements.")
 
 
-def package(app, output, profile_path=None, identity=None, bundle_identifier=None, report_path=None):
+# TrollStore installs keep the entitlements embedded in the main executable.
+# These raise the iPad jetsam limit so desktop game assets fit in memory.
+TROLLSTORE_ENTITLEMENTS = {
+    "com.apple.private.security.container-required": True,
+    "get-task-allow": True,
+    "com.apple.developer.kernel.increased-memory-limit": True,
+    "com.apple.private.memorystatus": True,
+}
+
+
+def trollstore_package(app, output, info_bytes, extensions):
+    info = plistlib.loads(info_bytes)
+    with tempfile.TemporaryDirectory(prefix="sts2-trollstore-") as temporary:
+        temporary = pathlib.Path(temporary)
+        staged = temporary / app.name
+        shutil.copytree(app, staged)
+        executable = staged / info["CFBundleExecutable"]
+        entitlements_path = temporary / "trollstore-entitlements.plist"
+        entitlements_path.write_bytes(plistlib.dumps(TROLLSTORE_ENTITLEMENTS))
+        # Sign a standalone copy so no bundle _CodeSignature directory is created.
+        standalone = temporary / "executable"
+        shutil.copy2(executable, standalone)
+        subprocess.run(["codesign", "--force", "--sign", "-", "--timestamp=none", "--generate-entitlement-der",
+                        "--entitlements", entitlements_path, standalone], check=True)
+        actual = plistlib.loads(subprocess.check_output(["codesign", "--display", "--entitlements", "-", "--xml", standalone]))
+        if any(actual.get(key) != value for key, value in TROLLSTORE_ENTITLEMENTS.items()):
+            raise SystemExit("The TrollStore executable is missing its memory entitlements.")
+        shutil.copy2(standalone, executable)
+        if (staged / "_CodeSignature").exists():
+            raise SystemExit("The TrollStore package must not contain a bundle signature.")
+        write_ipa(staged, output, info_bytes, extensions, signed=False)
+    print(f"Packaged TrollStore build with memory entitlements: {output}")
+
+
+def package(app, output, profile_path=None, identity=None, bundle_identifier=None, report_path=None, trollstore_output=None):
     info_bytes = (app / "Info.plist").read_bytes()
     info = plistlib.loads(info_bytes)
     if info.get("STS2ExtensionFixtures"):
@@ -85,6 +119,8 @@ def package(app, output, profile_path=None, identity=None, bundle_identifier=Non
             write_ipa(signed_app, output, info_bytes, extensions, signed=True)
     else:
         write_ipa(app, output, info_bytes, extensions, signed=False)
+        if trollstore_output:
+            trollstore_package(app, trollstore_output, info_bytes, extensions)
     mode = "development-signed" if profile_path else "unsigned"
     size = output.stat().st_size
     if report_path:
@@ -131,6 +167,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("dist/STS2IOSLauncher.ipa"))
+    parser.add_argument("--trollstore-output", type=pathlib.Path,
+                        help="also write an ad-hoc signed .tipa with TrollStore memory entitlements")
     parser.add_argument("--report", type=pathlib.Path, help="write package validation metadata and SHA-256")
     parser.add_argument("--profile", type=pathlib.Path, help="Apple development provisioning profile for the test iPad")
     parser.add_argument("--identity", help="matching Apple Development signing identity in the macOS Keychain")
@@ -140,4 +178,5 @@ if __name__ == "__main__":
         parser.error("--profile and --identity must be supplied together")
     if args.bundle_identifier and (not args.profile or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", args.bundle_identifier)):
         parser.error("--bundle-identifier requires development signing and a reverse DNS identifier")
-    package(args.app.resolve(), args.output.resolve(), args.profile, args.identity, args.bundle_identifier, args.report)
+    package(args.app.resolve(), args.output.resolve(), args.profile, args.identity, args.bundle_identifier, args.report,
+            args.trollstore_output.resolve() if args.trollstore_output else None)

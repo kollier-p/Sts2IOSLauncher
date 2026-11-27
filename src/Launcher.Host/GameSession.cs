@@ -54,11 +54,16 @@ internal static class GameSession
     {
         GameMemory.Log("returning from the run to the game main menu");
         GameRenderWarmup.ReleaseRetainedAssets();
+        GameMemory.Reclaim("leaving the run", force: true);
         if (OperatingSystem.IsIOS())
             _ = LogMenuReturnMemoryAsync(Interlocked.Increment(ref menuReturnGeneration));
     }
 
-    public static void LoadMainMenuPrefix() => GameMemory.Log("game loading its main menu scene");
+    public static void LoadMainMenuPrefix()
+    {
+        GameMemory.Log("game loading its main menu scene");
+        GameMemory.Reclaim("closing the run scene", force: true);
+    }
 
     public static void ReturnToMainMenuPostfix(Task __result) => _ = ObserveMenuReturnAsync(__result);
 
@@ -86,6 +91,7 @@ internal static class GameSession
         {
             await transition;
             GameMemory.Log("game finished returning to its main menu");
+            GameMemory.Reclaim("returning to the main menu", force: true);
         }
         catch (OperationCanceledException) { HostDiagnostics.Stage("game main menu return cancelled"); }
         catch (Exception error) { HostDiagnostics.Error("game main menu return failed", error); }

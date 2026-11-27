@@ -97,7 +97,7 @@ jobs:
         run: |
           build_dir=.native-build
           if [[ "$INCLUDE_EXTENSIONS" == "true" ]]; then build_dir+=/licensed-app; fi
-          python3 scripts/package_native_ipa.py "$build_dir/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app" --report "$build_dir/ipa-report.json"
+          python3 scripts/package_native_ipa.py "$build_dir/godot-derived/Build/Products/Release-iphoneos/Sts2Host.app" --report "$build_dir/ipa-report.json" --trollstore-output dist/STS2IOSLauncher-TrollStore.tipa
       - uses: actions/upload-artifact@v4
         if: inputs.include_extensions == true || vars.INCLUDE_NATIVE_EXTENSIONS == 'true'
         with:
@@ -133,6 +133,14 @@ jobs:
         with:
           name: STS2IOSLauncher-unsigned-ipa
           path: dist/STS2IOSLauncher.ipa
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload TrollStore IPA
+        if: inputs.upload_extension_ipa == true && inputs.include_extensions == true && inputs.package_ipa == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: STS2IOSLauncher-trollstore-tipa
+          path: dist/STS2IOSLauncher-TrollStore.tipa
           compression-level: 0
           if-no-files-found: error
       - uses: actions/upload-artifact@v4

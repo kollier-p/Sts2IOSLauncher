@@ -59,6 +59,7 @@ public static class Entry
             managed = Str(bundled);
             Directory.CreateDirectory(documents);
             HostDiagnostics.Initialize(Path.Combine(documents, "LauncherLogs"));
+            GameMemory.RaiseProcessLimit();
             try { LaunchCopy.RemoveInterruptedCopies(documents); }
             catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
             { HostDiagnostics.Error("recover launch copy", error); }
@@ -1714,6 +1715,7 @@ public static class Entry
     public static int ReportGameMemoryWarning()
     {
         GameMemory.Log("iPadOS sent the game a memory warning");
+        GameMemory.Reclaim("memory warning", force: true);
         return 0;
     }
 
