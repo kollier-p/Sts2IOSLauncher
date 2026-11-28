@@ -33,7 +33,16 @@ internal static class GameMemoryTrace
     static long windowStart, lastSample, lastFrame;
     static string windowReason = "";
     static int threadedRequests;
-    static bool inventoried;
+    static bool inventoried, nativeHeartbeat;
+
+    [System.Runtime.InteropServices.DllImport("__Internal", EntryPoint = "sts2_stall_sampler_start")]
+    static extern void StallSamplerStart();
+
+    [System.Runtime.InteropServices.DllImport("__Internal", EntryPoint = "sts2_stall_heartbeat")]
+    static extern void StallHeartbeat();
+
+    [System.Runtime.InteropServices.DllImport("__Internal", EntryPoint = "sts2_stall_sampler_end")]
+    static extern void StallSamplerEnd();
     static Assembly? godotAssembly;
     static string? lastThreadedPath;
 
@@ -93,6 +102,18 @@ internal static class GameMemoryTrace
             catch (Exception error) { HostDiagnostics.Error($"trace game {call.DeclaringType?.Name}.{call.Name}", error); }
         }
         HostDiagnostics.Stage($"game memory trace installed ({monitorIds.Count} Godot counters)");
+        if (OperatingSystem.IsIOS())
+        {
+            try
+            {
+                StallSamplerStart();
+                nativeHeartbeat = true;
+            }
+            catch (Exception error) when (error is EntryPointNotFoundException or DllNotFoundException)
+            {
+                HostDiagnostics.Error("start native stall sampler", error);
+            }
+        }
         LogShaderCache(godot);
     }
 
@@ -146,6 +167,8 @@ internal static class GameMemoryTrace
 
     internal static void End()
     {
+        if (nativeHeartbeat) StallSamplerEnd();
+        nativeHeartbeat = false;
         try { if (tree is not null && callback is not null) processFrame?.RemoveEventHandler(tree, callback); }
         catch (Exception error) { HostDiagnostics.Error("remove game memory trace", error); }
         tree = null;
@@ -155,6 +178,7 @@ internal static class GameMemoryTrace
 
     static void Frame()
     {
+        if (nativeHeartbeat) StallHeartbeat();
         long now = Stopwatch.GetTimestamp();
         if (lastFrame != 0)
         {

@@ -6,6 +6,13 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <atomic>
+#include <thread>
+#include <pthread.h>
+#include <malloc/malloc.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <os/proc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "LauncherFiles.mm"
@@ -116,6 +123,7 @@ static void captureConsole(NSString *documents) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
     captured = true;
+    gameMainThread = mach_thread_self();
     fprintf(stderr, "console capture started %s\n", NSDate.date.description.UTF8String);
 }
 
@@ -411,6 +419,95 @@ static void forward(id service,SEL selector,UIApplication *application) {
 }
 static void forwardAudioInterruption(id service,SEL selector,NSNotification *notification) {
     if(gameState==GameState::Running && audioInterruption)audioInterruption(service,selector,notification);
+}
+
+// Stall sampler. Device traces show single frames freezing for ~2 s while the
+// process briefly uses ~1 GiB outside every Godot counter. While the game's
+// main thread misses its frame heartbeat, a background thread records which
+// libraries and functions it is running in, with the process footprint and the
+// malloc heap size, and writes them to the console log.
+static mach_port_t gameMainThread = MACH_PORT_NULL;
+static std::atomic<uint64_t> gameHeartbeat{0};
+static std::atomic<bool> stallSamplerStarted{false};
+
+static uint64_t stallNow() {
+    static mach_timebase_info_data_t timebase;
+    if (!timebase.denom) mach_timebase_info(&timebase);
+    return mach_absolute_time() * timebase.numer / timebase.denom / 1000000ull;
+}
+
+static void sampleGameMainThread(uint64_t stalled, int index) {
+    enum { MaxFrames = 48 };
+    uintptr_t frames[MaxFrames];
+    int count = 0;
+    pthread_t main = pthread_main_thread_np();
+    uintptr_t low = (uintptr_t)pthread_get_stackaddr_np(main) - pthread_get_stacksize_np(main);
+    uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(main);
+    // Only read registers and stack words while the thread is suspended. Symbol
+    // lookup and malloc statistics take locks the main thread may hold.
+    if (thread_suspend(gameMainThread) != KERN_SUCCESS) return;
+    arm_thread_state64_t state;
+    mach_msg_type_number_t stateCount = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(gameMainThread, ARM_THREAD_STATE64, (thread_state_t)&state, &stateCount) == KERN_SUCCESS) {
+        const uintptr_t mask = 0x0000000FFFFFFFFFull;
+        frames[count++] = (uintptr_t)arm_thread_state64_get_pc(state) & mask;
+        frames[count++] = (uintptr_t)arm_thread_state64_get_lr(state) & mask;
+        uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+        while (count < MaxFrames && fp >= low && fp + 16 <= high && (fp & 7) == 0) {
+            uintptr_t next = ((uintptr_t *)fp)[0];
+            uintptr_t lr = ((uintptr_t *)fp)[1] & mask;
+            if (!lr) break;
+            frames[count++] = lr;
+            if (next <= fp) break;
+            fp = next;
+        }
+    }
+    thread_resume(gameMainThread);
+
+    malloc_statistics_t heap = {};
+    malloc_zone_statistics(nullptr, &heap);
+    task_vm_info_data_t vm = {};
+    mach_msg_type_number_t vmCount = TASK_VM_INFO_COUNT;
+    task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &vmCount);
+    fprintf(stderr, "stall sample %d: main thread blocked %llu ms, footprint %llu MiB, malloc in use %zu MiB, headroom %zu MiB\n",
+        index, stalled, vm.phys_footprint >> 20, heap.size_in_use >> 20, os_proc_available_memory() >> 20);
+    for (int i = 0; i < count; i++) {
+        Dl_info info = {};
+        if (dladdr((void *)frames[i], &info) && info.dli_fname) {
+            const char *image = strrchr(info.dli_fname, '/');
+            image = image ? image + 1 : info.dli_fname;
+            if (info.dli_sname)
+                fprintf(stderr, "  #%d %s %s+%lu\n", i, image, info.dli_sname, (unsigned long)(frames[i] - (uintptr_t)info.dli_saddr));
+            else
+                fprintf(stderr, "  #%d %s +0x%lx\n", i, image, (unsigned long)(frames[i] - (uintptr_t)info.dli_fbase));
+        } else fprintf(stderr, "  #%d 0x%lx\n", i, (unsigned long)frames[i]);
+    }
+}
+
+extern "C" __attribute__((visibility("default"),used)) void sts2_stall_heartbeat() {
+    gameHeartbeat.store(stallNow(), std::memory_order_relaxed);
+}
+
+extern "C" __attribute__((visibility("default"),used)) void sts2_stall_sampler_end() {
+    gameHeartbeat.store(0, std::memory_order_relaxed);
+}
+
+extern "C" __attribute__((visibility("default"),used)) void sts2_stall_sampler_start() {
+    if (gameMainThread == MACH_PORT_NULL || stallSamplerStarted.exchange(true)) return;
+    std::thread([] {
+        uint64_t sampledBeat = 0;
+        int samples = 0;
+        for (;;) {
+            usleep(150 * 1000);
+            uint64_t beat = gameHeartbeat.load(std::memory_order_relaxed);
+            if (!beat) continue;
+            uint64_t stalled = stallNow() - beat;
+            if (stalled < 400) continue;
+            if (beat != sampledBeat) { sampledBeat = beat; samples = 0; }
+            // A few samples per stall show how it progresses without flooding the log.
+            if (samples < 8 && (samples == 0 || stalled >= 400 + 250ull * samples)) sampleGameMainThread(stalled, ++samples);
+        }
+    }).detach();
 }
 
 extern "C" __attribute__((visibility("default"),used)) int sts2_return_to_launcher() {
