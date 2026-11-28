@@ -203,9 +203,11 @@ internal static class GameMemoryTrace
                 total++;
                 var name = getClass.Invoke(current, null) as string ?? current.GetType().Name;
                 counts[name] = counts.GetValueOrDefault(name) + 1;
-                if (details.Count < 40 && name is "SubViewport" or "Window" or "GPUParticles2D" or "GPUParticles3D" or
-                    "Camera3D" or "WorldEnvironment" or "VideoStreamPlayer" or "CanvasGroup" or "BackBufferCopy" or
-                    "MeshInstance3D" or "DirectionalLight3D")
+                // Render targets and Spine skeletons first; idle particles last.
+                if (name is "SubViewport" or "Window" or "SpineSprite" or "SubViewportContainer" or "Camera3D" or
+                    "WorldEnvironment" or "VideoStreamPlayer" or "CanvasGroup" or "BackBufferCopy" or "MeshInstance3D")
+                    details.Insert(0, $"{name} {Describe(current)}");
+                else if (name is "GPUParticles2D" or "GPUParticles3D" && details.Count < 60)
                     details.Add($"{name} {Describe(current)}");
                 if (getChildren.Invoke(current, [true]) is System.Collections.IEnumerable children)
                     foreach (var child in children)
@@ -213,7 +215,7 @@ internal static class GameMemoryTrace
             }
             var top = counts.OrderByDescending(pair => pair.Value).Take(40).Select(pair => $"{pair.Key} {pair.Value}");
             HostDiagnostics.Stage($"scene tree during stall ({total} nodes): {string.Join(", ", top)}");
-            if (details.Count > 0) HostDiagnostics.Stage($"scene tree render nodes: {string.Join("; ", details)}");
+            if (details.Count > 0) HostDiagnostics.Stage($"scene tree render nodes: {string.Join("; ", details.Take(60))}");
         }
         catch (Exception error)
         {
@@ -224,14 +226,30 @@ internal static class GameMemoryTrace
     static string Describe(object value)
     {
         var parts = new List<string>();
-        foreach (var property in new[] { "Name", "Size", "Msaa2D", "Msaa3D", "UseHdr2D", "RenderTargetUpdateMode",
-                     "Amount", "Emitting", "Visible", "FitMargin", "Stream" })
+        foreach (var property in new[] { "Name", "Size", "Size2DOverride", "Msaa2D", "Msaa3D", "UseHdr2D",
+                     "RenderTargetUpdateMode", "Stretch", "StretchShrink", "Amount", "Emitting", "Visible", "FitMargin",
+                     "Stream", "SceneFilePath" })
         {
             try
             {
                 if (value.GetType().GetProperty(property)?.GetValue(value) is { } setting) parts.Add($"{property}={setting}");
             }
             catch (TargetInvocationException) { }
+        }
+        // GDExtension nodes such as SpineSprite expose their settings only through Get.
+        foreach (var setting in new[] { "skeleton_data_res", "size" })
+        {
+            try
+            {
+                var get = value.GetType().GetMethod("Get", [godotAssembly!.GetType("Godot.StringName")!]);
+                var stringName = Activator.CreateInstance(godotAssembly.GetType("Godot.StringName")!, setting);
+                var variant = get?.Invoke(value, [stringName]);
+                var obj = variant?.GetType().GetProperty("Obj")?.GetValue(variant);
+                if (obj is null) continue;
+                var path = obj.GetType().GetProperty("ResourcePath")?.GetValue(obj) as string;
+                parts.Add($"{setting}={(string.IsNullOrEmpty(path) ? obj : path)}");
+            }
+            catch (Exception error) when (error is TargetInvocationException or MissingMethodException or ArgumentException) { }
         }
         return $"({string.Join(", ", parts)})";
     }

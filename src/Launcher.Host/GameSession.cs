@@ -101,7 +101,7 @@ internal static class GameSession
             GameMemory.Log("game finished returning to its main menu");
         }
         catch (OperationCanceledException) { HostDiagnostics.Stage("game main menu return cancelled"); }
-        catch (Exception error) { HostDiagnostics.Error("game main menu return failed", error); }
+        catch (Exception error) { HostDiagnostics.Fatal("game main menu return failed", error); }
     }
 
     static async Task ReturnAfterQuitAsync(Task quit)
