@@ -33,6 +33,8 @@ internal static class GameMemoryTrace
     static long windowStart, lastSample, lastFrame;
     static string windowReason = "";
     static int threadedRequests;
+    static bool inventoried;
+    static Assembly? godotAssembly;
     static string? lastThreadedPath;
 
     public readonly record struct LoadState(long Timestamp, ulong Headroom);
@@ -49,6 +51,7 @@ internal static class GameMemoryTrace
                 if (Enum.TryParse(monitorType, name, out var id)) monitorIds.Add((label, id!));
         }
 
+        godotAssembly = godot;
         var nodeType = godot.GetType("Godot.Node", throwOnError: true)!;
         tree = nodeType.GetMethod("GetTree", Type.EmptyTypes)!.Invoke(node, null);
         processFrame = godot.GetType("Godot.SceneTree", throwOnError: true)!.GetEvent("ProcessFrame");
@@ -68,6 +71,27 @@ internal static class GameMemoryTrace
         var request = loader?.GetMethods().SingleOrDefault(method => method.Name == "LoadThreadedRequest" &&
             method.GetParameters() is [{ ParameterType: var path }, ..] && path == typeof(string));
         if (request is not null) patch(request, typeof(GameMemoryTrace).GetMethod(nameof(ThreadedRequestPrefix))!, "prefix");
+
+        // Images decoded or uploaded from code bypass ResourceLoader.Load.
+        var image = godot.GetType("Godot.Image");
+        var imageTexture = godot.GetType("Godot.ImageTexture");
+        var imageCalls = new[]
+        {
+            image?.GetMethod("LoadFromFile", BindingFlags.Public | BindingFlags.Static, [typeof(string)]),
+            image?.GetMethod("Load", BindingFlags.Public | BindingFlags.Instance, [typeof(string)]),
+            image is null ? null : imageTexture?.GetMethod("CreateFromImage", BindingFlags.Public | BindingFlags.Static, [image]),
+            image?.GetMethod("GenerateMipmaps", BindingFlags.Public | BindingFlags.Instance, [typeof(bool)]),
+        };
+        foreach (var call in imageCalls)
+        {
+            if (call is null) continue;
+            try
+            {
+                patch(call, typeof(GameMemoryTrace).GetMethod(nameof(LoadPrefix))!, "prefix");
+                patch(call, typeof(GameMemoryTrace).GetMethod(nameof(ImagePostfix))!, "postfix");
+            }
+            catch (Exception error) { HostDiagnostics.Error($"trace game {call.DeclaringType?.Name}.{call.Name}", error); }
+        }
         HostDiagnostics.Stage($"game memory trace installed ({monitorIds.Count} Godot counters)");
         LogShaderCache(godot);
     }
@@ -115,6 +139,7 @@ internal static class GameMemoryTrace
         windowReason = reason;
         Volatile.Write(ref windowStart, Stopwatch.GetTimestamp());
         lastSample = 0;
+        inventoried = false;
         Interlocked.Exchange(ref threadedRequests, 0);
         Sample("start");
     }
@@ -135,6 +160,11 @@ internal static class GameMemoryTrace
         {
             var frame = Stopwatch.GetElapsedTime(lastFrame, now).TotalMilliseconds;
             if (frame >= StallMilliseconds) GameMemory.Log($"game frame stalled {frame:F0} ms");
+            if (frame >= 1000 && !inventoried && Volatile.Read(ref windowStart) != 0)
+            {
+                inventoried = true;
+                Inventory();
+            }
         }
         lastFrame = now;
         long start = Volatile.Read(ref windowStart);
@@ -148,6 +178,62 @@ internal static class GameMemoryTrace
         }
         if (lastSample != 0 && Stopwatch.GetElapsedTime(lastSample, now).TotalSeconds < SampleSeconds) return;
         Sample($"{elapsed:F2}s");
+    }
+
+    // Count the node classes in the whole scene tree and describe the node kinds
+    // that allocate render targets or GPU buffers.
+    static void Inventory()
+    {
+        try
+        {
+            var godot = godotAssembly!;
+            var node = godot.GetType("Godot.Node", throwOnError: true)!;
+            var getClass = godot.GetType("Godot.GodotObject", throwOnError: true)!.GetMethod("GetClass", Type.EmptyTypes)!;
+            var getChildren = node.GetMethod("GetChildren", [typeof(bool)])!;
+            var root = godot.GetType("Godot.SceneTree", throwOnError: true)!.GetProperty("Root")!.GetValue(tree);
+            if (root is null) return;
+            var counts = new Dictionary<string, int>();
+            var details = new List<string>();
+            var pending = new Stack<object>();
+            pending.Push(root);
+            int total = 0;
+            while (pending.Count > 0 && total < 50000)
+            {
+                var current = pending.Pop();
+                total++;
+                var name = getClass.Invoke(current, null) as string ?? current.GetType().Name;
+                counts[name] = counts.GetValueOrDefault(name) + 1;
+                if (details.Count < 40 && name is "SubViewport" or "Window" or "GPUParticles2D" or "GPUParticles3D" or
+                    "Camera3D" or "WorldEnvironment" or "VideoStreamPlayer" or "CanvasGroup" or "BackBufferCopy" or
+                    "MeshInstance3D" or "DirectionalLight3D")
+                    details.Add($"{name} {Describe(current)}");
+                if (getChildren.Invoke(current, [true]) is System.Collections.IEnumerable children)
+                    foreach (var child in children)
+                        if (child is not null) pending.Push(child);
+            }
+            var top = counts.OrderByDescending(pair => pair.Value).Take(40).Select(pair => $"{pair.Key} {pair.Value}");
+            HostDiagnostics.Stage($"scene tree during stall ({total} nodes): {string.Join(", ", top)}");
+            if (details.Count > 0) HostDiagnostics.Stage($"scene tree render nodes: {string.Join("; ", details)}");
+        }
+        catch (Exception error)
+        {
+            HostDiagnostics.Error("inventory game scene tree", error is TargetInvocationException { InnerException: { } cause } ? cause : error);
+        }
+    }
+
+    static string Describe(object value)
+    {
+        var parts = new List<string>();
+        foreach (var property in new[] { "Name", "Size", "Msaa2D", "Msaa3D", "UseHdr2D", "RenderTargetUpdateMode",
+                     "Amount", "Emitting", "Visible", "FitMargin", "Stream" })
+        {
+            try
+            {
+                if (value.GetType().GetProperty(property)?.GetValue(value) is { } setting) parts.Add($"{property}={setting}");
+            }
+            catch (TargetInvocationException) { }
+        }
+        return $"({string.Join(", ", parts)})";
     }
 
     static void Sample(string at)
@@ -191,6 +277,21 @@ internal static class GameMemoryTrace
                     $"(iPad process headroom {after / GameMemory.MiB} MiB)");
         }
         catch (Exception error) { HostDiagnostics.Error("trace game resource load", error); }
+    }
+
+    public static void ImagePostfix(MethodBase __originalMethod, object[] __args, LoadState __state)
+    {
+        try
+        {
+            var elapsed = Stopwatch.GetElapsedTime(__state.Timestamp).TotalMilliseconds;
+            ulong after = GameMemory.AvailableBytes() ?? 0;
+            ulong used = __state.Headroom > after ? __state.Headroom - after : 0;
+            if (used < LoadDeltaBytes && elapsed < 100) return;
+            var subject = __args.FirstOrDefault() is string path ? $" {path}" : "";
+            HostDiagnostics.Stage($"game {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}{subject} took " +
+                $"{elapsed:F0} ms using {used / GameMemory.MiB} MiB (iPad process headroom {after / GameMemory.MiB} MiB)");
+        }
+        catch (Exception error) { HostDiagnostics.Error("trace game image call", error); }
     }
 
     public static void ThreadedRequestPrefix(string __0)

@@ -57,6 +57,35 @@ internal static class GameMenuRetention
         }
         GameMemory.Log($"kept {retained.Count - before} main menu resources from {nodes} nodes for the return from runs " +
             $"({retained.Count} total)");
+        Describe(godot);
+    }
+
+    // Name the menu's resource types and its large textures, so device logs
+    // show what the menu holds when its first frame stalls.
+    static void Describe(Assembly godot)
+    {
+        var texture = godot.GetType("Godot.Texture2D");
+        var width = texture?.GetMethod("GetWidth", Type.EmptyTypes);
+        var height = texture?.GetMethod("GetHeight", Type.EmptyTypes);
+        var path = godot.GetType("Godot.Resource")?.GetProperty("ResourcePath");
+        var types = retained.GroupBy(value => value.GetType().Name).OrderByDescending(group => group.Count())
+            .Select(group => $"{group.Key} {group.Count()}");
+        HostDiagnostics.Stage($"main menu resource types: {string.Join(", ", types)}");
+        if (texture is null || width is null || height is null) return;
+        var large = new List<string>();
+        foreach (var value in retained)
+        {
+            if (!texture.IsInstanceOfType(value)) continue;
+            try
+            {
+                int w = (int)width.Invoke(value, null)!, h = (int)height.Invoke(value, null)!;
+                if (Math.Max(w, h) < 1024) continue;
+                var name = path?.GetValue(value) as string;
+                large.Add($"{value.GetType().Name} {w}x{h} {(string.IsNullOrEmpty(name) ? "(generated)" : name)}");
+            }
+            catch (TargetInvocationException) { }
+        }
+        if (large.Count > 0) HostDiagnostics.Stage($"main menu large textures: {string.Join("; ", large.Take(40))}");
     }
 
     internal static void Release()
