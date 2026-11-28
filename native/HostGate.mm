@@ -5,6 +5,7 @@
 #import <objc/runtime.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "LauncherFiles.mm"
@@ -90,6 +91,32 @@ static NSString *startManagedLauncher(NSString *library, NSString *managed, NSSt
 
     result = initHost(payload.UTF8String, documents.UTF8String, managed.UTF8String);
     return result == 0 ? nil : [NSString stringWithFormat:@"Managed launcher startup failed (%d).", result];
+}
+
+// Mono writes its native crash reports and unhandled exceptions to stderr, and
+// nothing on the device keeps it. Send stdout and stderr to LauncherLogs so the
+// next launch can show why the previous session ended.
+static void captureConsole(NSString *documents) {
+    static bool captured;
+    if (captured) return;
+    NSString *directory = [documents stringByAppendingPathComponent:@"LauncherLogs"];
+    if (!directory || ![[NSFileManager defaultManager] createDirectoryAtPath:directory
+        withIntermediateDirectories:YES attributes:nil error:nullptr]) return;
+    NSString *path = [directory stringByAppendingPathComponent:@"console.log"];
+    NSString *previous = [directory stringByAppendingPathComponent:@"console.log.previous"];
+    [[NSFileManager defaultManager] removeItemAtPath:previous error:nullptr];
+    [[NSFileManager defaultManager] moveItemAtPath:path toPath:previous error:nullptr];
+    int file = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+    if (file < 0) return;
+    fflush(stdout);
+    fflush(stderr);
+    dup2(file, STDOUT_FILENO);
+    dup2(file, STDERR_FILENO);
+    close(file);
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    captured = true;
+    fprintf(stderr, "console capture started %s\n", NSDate.date.description.UTF8String);
 }
 
 static void recordStartupStatus(NSString *documents, NSString *status) {
@@ -251,7 +278,7 @@ static BOOL workshopImageURL(NSURL *url) {
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemSearch target:self action:@selector(searchLog)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(refreshLog)]
     ];
-    self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous",@"Startup"]];
+    self.source=[[UISegmentedControl alloc] initWithItems:@[@"Launcher",@"Godot",@"Previous",@"Startup",@"Console",@"Last console"]];
     self.source.selectedSegmentIndex=0;
     [self.source addTarget:self action:@selector(refreshLog) forControlEvents:UIControlEventValueChanged];
     self.navigationItem.titleView=self.source;
@@ -295,7 +322,7 @@ static BOOL workshopImageURL(NSURL *url) {
     [self.output scrollRangeToVisible:NSMakeRange(self.output.text.length,0)];
 }
 - (NSURL *)logURL {
-    NSArray<NSString *> *sources=@[@"launcher.log",@"godot.log",@"godot.log.previous",@"startup.log"];
+    NSArray<NSString *> *sources=@[@"launcher.log",@"godot.log",@"godot.log.previous",@"startup.log",@"console.log",@"console.log.previous"];
     return [self.directory URLByAppendingPathComponent:sources[self.source.selectedSegmentIndex]];
 }
 - (void)shareLog:(UIBarButtonItem *)sender {
@@ -579,6 +606,7 @@ extern "C" __attribute__((visibility("default"),used)) void sts2_game_keyboard_r
         NSString *docs=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
         NSString *support=NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,NSUserDomainMask,YES).firstObject;
         NSString *payload=[support stringByAppendingPathComponent:@"STS2Payloads"];
+        captureConsole(docs);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
             NSString *failure = startManagedLauncher(library, managed, frameworks, payload, docs);
             if (failure) {

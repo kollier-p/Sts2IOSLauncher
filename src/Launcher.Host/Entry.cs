@@ -60,6 +60,11 @@ public static class Entry
             Directory.CreateDirectory(documents);
             HostDiagnostics.Initialize(Path.Combine(documents, "LauncherLogs"));
             GameMemory.RaiseProcessLimit();
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+                HostDiagnostics.Fatal(args.IsTerminating ? "unhandled exception ending the game" : "unhandled exception",
+                    args.ExceptionObject);
+            TaskScheduler.UnobservedTaskException += (_, args) =>
+                HostDiagnostics.Fatal("unobserved task exception", args.Exception);
             try { LaunchCopy.RemoveInterruptedCopies(documents); }
             catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
             { HostDiagnostics.Error("recover launch copy", error); }

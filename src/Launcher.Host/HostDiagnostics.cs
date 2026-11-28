@@ -31,5 +31,13 @@ internal static class HostDiagnostics
             }
         }
     }
+    // An unhandled exception ends the process, so record the whole exception.
+    public static void Fatal(string origin, object? error)
+    {
+        string text;
+        try { text = error?.ToString() ?? "unknown error"; }
+        catch (Exception formatting) { text = $"{error?.GetType().FullName} (formatting failed: {formatting.GetType().Name})"; }
+        lock (Gate) Write($"{origin}: {text}");
+    }
     static void Write(string message){try{if(path!=null)File.AppendAllText(path,DateTimeOffset.UtcNow.ToString("O")+" "+message+Environment.NewLine);}catch(IOException){}catch(UnauthorizedAccessException){}}
 }
